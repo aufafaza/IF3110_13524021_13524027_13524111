@@ -7,11 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"tubes1/internal/server"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
 )
 
 func TestHealthOverHTTP(t *testing.T) {
-	srv := httptest.NewServer(server.New())
+	srv := httptest.NewServer(web.New())
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/healthz")
