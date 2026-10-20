@@ -1,22 +1,34 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
-	"os"
 
-	"tubes1/internal/server"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/config"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/migrations"
 )
 
 func main() {
-	addr := ":" + getenv("PORT", "8080")
-	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, server.New()))
-}
+	ctx := context.Background()
 
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config: %v", err)
 	}
-	return fallback
+
+	pool, err := platformdb.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
+
+	if err := platformdb.Migrate(ctx, pool, migrations.Platform()); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("listening on %s", cfg.ListenAddr)
+	log.Fatal(http.ListenAndServe(cfg.ListenAddr, web.New()))
 }
