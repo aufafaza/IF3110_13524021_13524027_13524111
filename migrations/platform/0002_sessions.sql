@@ -1,4 +1,3 @@
--- Only hashes of session IDs are stored, never the raw value.
 CREATE TABLE sessions (
     id_hash             BYTEA       PRIMARY KEY,
     prev_id_hash        BYTEA,

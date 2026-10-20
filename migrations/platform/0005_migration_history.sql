@@ -1,4 +1,3 @@
--- version is NULL while the migration is a draft; it is assigned at execution.
 CREATE TABLE migrations (
     id            BIGSERIAL PRIMARY KEY,
     database_id   BIGINT      NOT NULL REFERENCES managed_databases(id) ON DELETE CASCADE,
