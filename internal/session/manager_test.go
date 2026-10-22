@@ -18,6 +18,8 @@ func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 type fakeStore struct {
 	sessions  []session.Session
 	createErr error
+	getErr    error
+	touchErr  error
 }
 
 func (f *fakeStore) Create(ctx context.Context, s session.Session) error {
@@ -28,21 +30,57 @@ func (f *fakeStore) Create(ctx context.Context, s session.Session) error {
 	return nil
 }
 
-func (f *fakeStore) GetByIDHash(ctx context.Context, hash []byte) (session.Session, error) {
-	for _, s := range f.sessions {
+func (f *fakeStore) find(hash []byte) int {
+	for i, s := range f.sessions {
 		if bytes.Equal(s.IDHash, hash) || (s.PrevIDHash != nil && bytes.Equal(s.PrevIDHash, hash)) {
-			return s, nil
+			return i
 		}
+	}
+	return -1
+}
+
+func (f *fakeStore) GetByIDHash(ctx context.Context, hash []byte) (session.Session, error) {
+	if f.getErr != nil {
+		return session.Session{}, f.getErr
+	}
+	if i := f.find(hash); i >= 0 {
+		return f.sessions[i], nil
 	}
 	return session.Session{}, session.ErrNotFound
 }
 
-func (f *fakeStore) Touch(context.Context, []byte, time.Time) error { panic("unused") }
+func (f *fakeStore) Touch(ctx context.Context, idHash []byte, now time.Time) error {
+	if f.touchErr != nil {
+		return f.touchErr
+	}
+	i := f.find(idHash)
+	if i < 0 {
+		return session.ErrNotFound
+	}
+	f.sessions[i].LastSeenAt = now
+	return nil
+}
+
+func (f *fakeStore) Revoke(ctx context.Context, idHash []byte, now time.Time) error {
+	if i := f.find(idHash); i >= 0 {
+		f.sessions[i].RevokedAt = &now
+	}
+	return nil
+}
+
+func (f *fakeStore) RevokeAllForUser(ctx context.Context, userID int64, now time.Time) error {
+	for i := range f.sessions {
+		if f.sessions[i].UserID == userID && f.sessions[i].RevokedAt == nil {
+			t := now
+			f.sessions[i].RevokedAt = &t
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) Rotate(context.Context, []byte, []byte, time.Time, time.Time) error {
 	panic("unused")
 }
-func (f *fakeStore) Revoke(context.Context, []byte, time.Time) error          { panic("unused") }
-func (f *fakeStore) RevokeAllForUser(context.Context, int64, time.Time) error { panic("unused") }
 
 var testConfig = session.Config{
 	IdleTimeout:      30 * time.Minute,
