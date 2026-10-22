@@ -10,7 +10,7 @@ import (
 type UserStore interface {
 	FindByUsername(ctx context.Context, username string) (StoredUser, error)
 	FindByID(ctx context.Context, ID int64) (StoredUser, error)
-	Create(ctx context.Context, u NewUser) (int64, error)
+	Create(ctx context.Context, u CreateUserParams) (int64, error)
 }
 
 type Service struct {
