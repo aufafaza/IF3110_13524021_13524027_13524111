@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Migration #{{.Migration.ID}} — Database #{{.DatabaseID}}</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #1f2937; background: #f9fafb; }
+        .container { max-width: 960px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+        .badge { display: inline-block; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
+        .badge-applied { background: #d1fae5; color: #065f46; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-draft { background: #fef3c7; color: #92400e; }
+        .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; background: #f9fafb; padding: 1rem; border-radius: 6px; margin-bottom: 1.5rem; }
+        .meta-item strong { display: block; font-size: 0.8rem; color: #6b7280; text-transform: uppercase; }
+        pre { background: #111827; color: #f9fafb; padding: 1rem; border-radius: 6px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
+        .alert-error { background: #fee2e2; border: 1px solid #f87171; color: #991b1b; padding: 1rem; border-radius: 6px; margin-bottom: 1.5rem; }
+        .execute-panel { background: #fffbeb; border: 1px solid #fcd34d; padding: 1.25rem; border-radius: 6px; margin-top: 1.5rem; }
+        .btn { display: inline-block; padding: 0.55rem 1.1rem; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 0.9rem; cursor: pointer; border: 1px solid transparent; margin-right: 0.5rem; }
+        .btn-primary { background: #2563eb; color: #ffffff; }
+        .btn-secondary { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+        .btn-danger { background: #dc2626; color: #ffffff; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <div>
+            <h1>
+                {{if .Migration.Version}}<span class="mono">v{{derefInt .Migration.Version}}</span> — {{end}}{{.Migration.Title}}
+            </h1>
+            <span class="badge badge-{{.Migration.Status}}">{{.Migration.Status}}</span>
+        </div>
+        <div>
+            <a class="btn btn-secondary" href="/databases/{{.DatabaseID}}/migrations">Back to History</a>
+            {{if and .CanEdit (eq .Migration.Status "draft")}}
+            <a class="btn btn-primary" href="/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}/edit">Edit Draft</a>
+            {{end}}
+        </div>
+    </header>
+
+    {{if .Error}}
+    <div class="alert-error" role="alert">
+        <strong>Error:</strong> {{.Error}}
+    </div>
+    {{end}}
+
+    {{if .Migration.ErrorMessage}}
+    <div class="alert-error" role="alert">
+        <strong>Execution Failed (Transaction Rolled Back):</strong>
+        <pre style="background: #7f1d1d; color: #fecaca; margin-top: 0.5rem;"><code>{{derefStr .Migration.ErrorMessage}}</code></pre>
+    </div>
+    {{end}}
+
+    <div class="meta-grid">
+        <div class="meta-item">
+            <strong>Migration ID</strong>
+            <span class="mono">#{{.Migration.ID}}</span>
+        </div>
+        <div class="meta-item">
+            <strong>Version</strong>
+            <span class="mono">{{if .Migration.Version}}v{{derefInt .Migration.Version}}{{else}}Unassigned (Draft){{end}}</span>
+        </div>
+        <div class="meta-item">
+            <strong>Created By</strong>
+            <span>{{if .Migration.CreatedByUsername}}{{.Migration.CreatedByUsername}}{{else}}User #{{.Migration.CreatedBy}}{{end}}</span>
+        </div>
+        <div class="meta-item">
+            <strong>Created At</strong>
+            <span>{{formatTime .Migration.CreatedAt}}</span>
+        </div>
+        <div class="meta-item">
+            <strong>Executed By</strong>
+            <span>{{if .Migration.ExecutedByUsername}}{{derefStr .Migration.ExecutedByUsername}}{{else if .Migration.ExecutedBy}}User #{{derefInt64 .Migration.ExecutedBy}}{{else}}-{{end}}</span>
+        </div>
+        <div class="meta-item">
+            <strong>Executed At</strong>
+            <span>{{formatTimePtr .Migration.ExecutedAt}}</span>
+        </div>
+    </div>
+
+    <h2>SQL Script ({{len .Statements}} statement{{if ne (len .Statements) 1}}s{{end}})</h2>
+    <pre><code>{{.Migration.SQL}}</code></pre>
+
+    {{if and .CanEdit (eq .Migration.Status "draft")}}
+    <div class="execute-panel">
+        <h3>Preview &amp; Execute Migration</h3>
+        <p>Executing this migration will acquire the database advisory lock, assign the next sequential version, and run all {{len .Statements}} statement(s) inside a transaction (<code>BEGIN ... COMMIT</code>). If any statement fails, all changes on the target database will be rolled back and the failure will be recorded in history.</p>
+        <form method="POST" action="/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}/execute">
+            {{if .CSRFToken}}
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            {{end}}
+            <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem; font-weight: 600;">
+                <input type="checkbox" name="confirm" value="true" required>
+                I confirm executing Migration #{{.Migration.ID}} ({{.Migration.Title}}) on Database #{{.DatabaseID}}.
+            </label>
+            <button type="submit" class="btn btn-danger">Execute Migration</button>
+        </form>
+    </div>
+    {{end}}
+</div>
+</body>
+</html>
