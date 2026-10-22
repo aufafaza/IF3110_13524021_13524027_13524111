@@ -77,24 +77,23 @@ func (s *PostgresStore) GetByIDHash(ctx context.Context, hash []byte) (Session, 
 	return sess, nil
 }
 
-
-func (s*PostgresStore) Touch(ctx context.Context, idHash []byte, now time.Time) error { 
+func (s *PostgresStore) Touch(ctx context.Context, idHash []byte, now time.Time) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE sessions 
 			SET last_seen_at = $2 WHERE id_hash = $1	
-		`, 
-		idHash, now)	
+		`,
+		idHash, now)
 
 	if err != nil {
 		return fmt.Errorf("session: touch: %w", err)
 	}
-	if (tag.RowsAffected() == 0) { 
-		return fmt.Errorf("session: touch: row affected = 0)"); 
-	} 
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session: touch: row affected = 0)")
+	}
 
 	return nil
 
-} 
+}
 
 func (s *PostgresStore) Rotate(ctx context.Context, oldHash, newHash []byte, now, graceUntil time.Time) error {
 	tag, err := s.pool.Exec(ctx,
@@ -115,30 +114,28 @@ func (s *PostgresStore) Rotate(ctx context.Context, oldHash, newHash []byte, now
 	return nil
 }
 
-func (s *PostgresStore) Revoke(ctx context.Context, idHash []byte, now time.Time) error{ 
-	_, err := s.pool.Exec(ctx, 
+func (s *PostgresStore) Revoke(ctx context.Context, idHash []byte, now time.Time) error {
+	_, err := s.pool.Exec(ctx,
 		` 
 			UPDATE sessions
 			SET revoked_at = $2 WHERE id_hash = $1
-		`, idHash, now) 
+		`, idHash, now)
 
-	if (err != nil){ 
+	if err != nil {
 		return fmt.Errorf("session: revoke: %w", err)
 	}
-	return nil 
-} 
+	return nil
+}
 
-func (s *PostgresStore) RevokeAllForUser(ctx context.Context, userID int64, now time.Time) error { 
-	_, err := s.pool.Exec(ctx, 
+func (s *PostgresStore) RevokeAllForUser(ctx context.Context, userID int64, now time.Time) error {
+	_, err := s.pool.Exec(ctx,
 		` 
 			UPDATE sessions
 			SET revoked_at = $2 WHERE user_id = $1 AND revoked_at is NULL 
-		`, userID, now) 
+		`, userID, now)
 
-	if (err != nil){ 
-		return fmt.Errorf("session: revoke: %w", err)
+	if err != nil {
+		return fmt.Errorf("session: revoke all: %w", err)
 	}
-	return nil 
-} 
-
-
+	return nil
+}
