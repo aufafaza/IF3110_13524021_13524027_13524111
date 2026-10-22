@@ -28,7 +28,7 @@ func (f *fakeStore) FindByUsername(ctx context.Context, name string) (auth.Store
 
 
 func (f *fakeStore) FindByID(context.Context, int64) (auth.StoredUser, error) { panic("unused") }
-func (f *fakeStore) Create(context.Context, auth.NewUser) (int64, error)      { panic("unused") }
+func (f *fakeStore) Create(context.Context, auth.CreateUserParams) (int64, error)      { panic("unused") }
 
 type fakeHasher struct {
 	verifyCalls int

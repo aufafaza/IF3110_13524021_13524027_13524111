@@ -55,7 +55,7 @@ func run(username string) error {
 		return err
 	}
 
-	id, err := auth.NewPostgresStore(pool).Create(ctx, auth.NewUser{
+	id, err := auth.NewPostgresStore(pool).Create(ctx, auth.CreateUserParams{
 		Username:        username,
 		PasswordHash:    hash,
 		IsPlatformAdmin: true,

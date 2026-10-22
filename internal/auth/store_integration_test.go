@@ -40,7 +40,7 @@ func TestCreateThenFind(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
-	id, err := store.Create(ctx, auth.NewUser{
+	id, err := store.Create(ctx, auth.CreateUserParams{
 		Username:        "alice",
 		PasswordHash:    "hash-1",
 		IsPlatformAdmin: true,
@@ -81,7 +81,7 @@ func TestCreateDefaultsToActiveNonAdmin(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
-	id, err := store.Create(ctx, auth.NewUser{Username: "bob", PasswordHash: "h"})
+	id, err := store.Create(ctx, auth.CreateUserParams{Username: "bob", PasswordHash: "h"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,10 +98,10 @@ func TestCreateDuplicateUsername(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 
-	if _, err := store.Create(ctx, auth.NewUser{Username: "alice", PasswordHash: "h"}); err != nil {
+	if _, err := store.Create(ctx, auth.CreateUserParams{Username: "alice", PasswordHash: "h"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := store.Create(ctx, auth.NewUser{Username: "alice", PasswordHash: "other"})
+	_, err := store.Create(ctx, auth.CreateUserParams{Username: "alice", PasswordHash: "other"})
 	if !errors.Is(err, auth.ErrUsernameTaken) {
 		t.Fatalf("want ErrUsernameTaken, got %v", err)
 	}

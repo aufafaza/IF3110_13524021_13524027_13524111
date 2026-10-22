@@ -121,7 +121,7 @@ func TestVerifyIncompatibleVersion(t *testing.T) {
 }
 
 func TestArgon2idHasherSatisfiesInterface(t *testing.T) {
-	var h auth.PasswordHasher = auth.Argon2idHasher{Params: *testParams}
+	var h auth.PasswordHasher = auth.Argon2idHasher{Argon2Params: *testParams}
 
 	enc, err := h.Hash("secret")
 	if err != nil {
