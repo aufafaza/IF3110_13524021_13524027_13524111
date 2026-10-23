@@ -31,11 +31,11 @@ type fakeSessions struct {
 	loggedOut []string
 }
 
-func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Session, error) {
+func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Validated, error) {
 	if !f.valid {
-		return session.Session{}, session.ErrUnauthenticated
+		return session.Validated{}, session.ErrUnauthenticated
 	}
-	return session.Session{UserID: 7, CSRFSecret: testSecret}, nil
+	return session.Validated{Session: session.Session{UserID: 7, CSRFSecret: testSecret}}, nil
 }
 
 func (f *fakeSessions) Login(_ context.Context, _ int64) (string, error) { return "tok", nil }

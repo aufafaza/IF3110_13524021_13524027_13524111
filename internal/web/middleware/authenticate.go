@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
@@ -17,7 +18,7 @@ type UserLookup interface {
 }
 
 type SessionManager interface {
-	Validate(ctx context.Context, rawToken string) (session.Session, error)
+	Validate(ctx context.Context, rawToken string) (session.Validated, error)
 	Logout(ctx context.Context, rawToken string) error
 }
 
@@ -41,7 +42,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		sess, err := a.sessions.Validate(ctx, raw)
+		validated, err := a.sessions.Validate(ctx, raw)
 		if errors.Is(err, session.ErrUnauthenticated) {
 			session.ClearCookie(w, a.cookie)
 			next.ServeHTTP(w, r)
@@ -53,7 +54,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		stored, err := a.users.FindByID(ctx, sess.UserID)
+		stored, err := a.users.FindByID(ctx, validated.Session.UserID)
 		if errors.Is(err, auth.ErrNotFound) {
 			a.dropSession(ctx, w, raw)
 			next.ServeHTTP(w, r)
@@ -76,8 +77,11 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			Username:        stored.Username,
 			IsPlatformAdmin: stored.IsPlatformAdmin,
 		}
-		ctx = csrf.ContextWithToken(ctx, csrf.TokenFromSecret(sess.CSRFSecret))
+		ctx = csrf.ContextWithToken(ctx, csrf.TokenFromSecret(validated.Session.CSRFSecret))
 		ctx = access.ContextWithUser(ctx, user)
+		if validated.NewToken != "" {
+			session.SetCookie(w, a.cookie, validated.NewToken, time.Time{})
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

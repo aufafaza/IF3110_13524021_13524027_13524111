@@ -21,13 +21,14 @@ var csrfSecret = []byte("0123456789abcdef")
 
 type fakeSessions struct {
 	sess        session.Session
+	newToken    string
 	validateErr error
 	logoutErr   error
 	loggedOut   []string
 }
 
-func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Session, error) {
-	return f.sess, f.validateErr
+func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Validated, error) {
+	return session.Validated{Session: f.sess, NewToken: f.newToken}, f.validateErr
 }
 
 func (f *fakeSessions) Logout(_ context.Context, raw string) error {
@@ -234,5 +235,62 @@ func TestAuthenticate_InfrastructureErrors(t *testing.T) {
 				t.Error("internal error detail leaked in response body")
 			}
 		})
+	}
+}
+
+func sessionCookie(rec *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestAuthenticate_RotatedTokenIsSentAsCookie(t *testing.T) {
+	sessions := &fakeSessions{
+		sess:     session.Session{UserID: 7, CSRFSecret: csrfSecret},
+		newToken: "rotated-token",
+	}
+	res := run(t, sessions, &fakeUsers{user: activeUser()}, true)
+
+	if !res.nextCalled || !res.hasUser {
+		t.Fatalf("nextCalled = %v, hasUser = %v; want true, true", res.nextCalled, res.hasUser)
+	}
+	c := sessionCookie(res.rec)
+	if c == nil {
+		t.Fatal("no session cookie sent after rotation")
+	}
+	if c.Value != "rotated-token" {
+		t.Errorf("cookie value = %q, want rotated-token", c.Value)
+	}
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie flags HttpOnly=%v Secure=%v SameSite=%v", c.HttpOnly, c.Secure, c.SameSite)
+	}
+}
+
+func TestAuthenticate_NoRotationSendsNoCookie(t *testing.T) {
+	sessions := &fakeSessions{sess: session.Session{UserID: 7, CSRFSecret: csrfSecret}}
+	res := run(t, sessions, &fakeUsers{user: activeUser()}, true)
+
+	if c := sessionCookie(res.rec); c != nil {
+		t.Errorf("unexpected session cookie without rotation: %+v", c)
+	}
+}
+
+func TestAuthenticate_RotatedTokenNotSentForInactiveUser(t *testing.T) {
+	sessions := &fakeSessions{
+		sess:     session.Session{UserID: 7},
+		newToken: "rotated-token",
+	}
+	users := &fakeUsers{user: auth.StoredUser{ID: 7, IsActive: false}}
+	res := run(t, sessions, users, true)
+
+	c := sessionCookie(res.rec)
+	if c == nil || c.Value != "" || c.MaxAge >= 0 {
+		t.Errorf("want the cookie cleared, got %+v", c)
+	}
+	if len(sessions.loggedOut) != 1 {
+		t.Errorf("session not revoked: %v", sessions.loggedOut)
 	}
 }
