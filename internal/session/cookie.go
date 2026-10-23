@@ -14,14 +14,14 @@ type CookieConfig struct {
 
 func ParseSameSite(s string) http.SameSite {
 	if s == "Lax" {
-		return http.SameSiteStrictMode
-	}
-
-	if s == "Strict" {
 		return http.SameSiteLaxMode
 	}
 
-	return http.SameSiteNoneMode
+	if s == "Strict" {
+		return http.SameSiteStrictMode
+	}
+
+	return http.SameSiteLaxMode
 }
 
 func SetCookie(w http.ResponseWriter, cfg CookieConfig, rawToken string, expires time.Time) {
@@ -33,6 +33,7 @@ func SetCookie(w http.ResponseWriter, cfg CookieConfig, rawToken string, expires
 		SameSite: cfg.SameSite,
 		Domain:   cfg.Domain,
 		Expires:  expires,
+		Value: rawToken,
 	}
 	http.SetCookie(w, &cookie)
 }
