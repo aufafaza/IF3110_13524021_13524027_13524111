@@ -1,0 +1,57 @@
+{{define "content"}}
+<h1>Users</h1>
+{{template "users" .Data}}
+{{end}}
+
+{{define "users"}}
+<div id="users">
+	{{if .Message}}<p class="notice">{{.Message}}</p>{{end}}
+	{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+	<section>
+		<h2>Create user</h2>
+		<form class="stack" hx-post="/admin/users" hx-target="#users" hx-swap="outerHTML">
+			<label>Username
+				<input name="username" required minlength="3" maxlength="64" autocomplete="off">
+			</label>
+			<label>Password (at least 12 characters)
+				<input type="password" name="password" required minlength="12" maxlength="128" autocomplete="new-password">
+			</label>
+			<label class="inline">
+				<input type="checkbox" name="is_admin" value="1"> Platform admin
+			</label>
+			<button type="submit">Create user</button>
+		</form>
+	</section>
+
+	<section>
+		<h2>All users</h2>
+		<table>
+			<thead>
+				<tr><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+			</thead>
+			<tbody>
+			{{range .Users}}
+				<tr>
+					<td>{{.Username}}</td>
+					<td>{{if .IsPlatformAdmin}}Platform admin{{else}}User{{end}}</td>
+					<td>{{if .IsActive}}Active{{else}}Inactive{{end}}</td>
+					<td class="actions">
+						<form hx-post="/admin/users/{{.ID}}/active" hx-target="#users" hx-swap="outerHTML"{{if .IsActive}} hx-confirm="Deactivate {{.Username}}? Their sessions end immediately."{{end}}>
+							<input type="hidden" name="active" value="{{if .IsActive}}false{{else}}true{{end}}">
+							<button type="submit" class="{{if .IsActive}}danger{{end}}"{{if eq .ID $.CurrentUserID}} disabled title="You cannot deactivate your own account"{{end}}>{{if .IsActive}}Deactivate{{else}}Activate{{end}}</button>
+						</form>
+						<form class="row" hx-post="/admin/users/{{.ID}}/password" hx-target="#users" hx-swap="outerHTML" hx-confirm="Reset the password for {{.Username}}? Their sessions end immediately.">
+							<input type="password" name="password" placeholder="New password" aria-label="New password for {{.Username}}" required minlength="12" maxlength="128" autocomplete="new-password">
+							<button type="submit">Reset password</button>
+						</form>
+					</td>
+				</tr>
+			{{else}}
+				<tr><td colspan="4" class="muted">No users yet.</td></tr>
+			{{end}}
+			</tbody>
+		</table>
+	</section>
+</div>
+{{end}}
