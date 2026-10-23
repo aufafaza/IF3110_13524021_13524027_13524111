@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/config"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
@@ -14,6 +15,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/migrations"
 )
 
@@ -55,8 +57,16 @@ func main() {
 		Domain:   cfg.Session.Domain,
 	}
 
+	tmpl, err := templates.New()
+	if err != nil {
+		log.Fatalf("templates: %v", err)
+	}
+	adminService := admin.NewService(admin.NewPostgresStore(pool), auth.NewArgon2idHasher(), sessions)
+
 	handler := web.New(web.Deps{
 		Auth:         handlers.NewAuthHandler(authService, sessions, cookie),
+		Home:         handlers.NewHomeHandler(tmpl),
+		Admin:        handlers.NewAdminHandler(adminService, tmpl),
 		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
 		Guard:        access.NewGuard(access.NewPostgresChecker(pool), "/login"),
 	})
