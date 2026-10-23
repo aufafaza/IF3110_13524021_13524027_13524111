@@ -11,6 +11,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
 
 type Authenticator interface {
@@ -38,6 +39,7 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 <body>
 {{if .Error}}<p>{{.Error}}</p>{{end}}
 <form method="post" action="/login">
+	<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 	<label>Username <input name="username" autocomplete="username"></label>
 	<label>Password <input type="password" name="password" autocomplete="current-password"></label>
 	<button type="submit">Log in</button>
@@ -46,11 +48,31 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 </html>`))
 
 func (h *AuthHandler) renderLogin(w http.ResponseWriter, status int, errMsg string) {
+	token, err := h.issueLoginToken(w)
+	if err != nil { 
+		log.Printf("login: csrf token: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
 	w.WriteHeader(status)
-	if err := loginTmpl.Execute(w, struct{ Error string }{errMsg}); err != nil {
+	data := struct { Error, CSRFToken string } {errMsg, token } 
+	if err := loginTmpl.Execute(w, data); err != nil { 
 		log.Printf("login: render: %v", err)
 	}
+}
+
+func (h *AuthHandler) clearLoginToken(w http.ResponseWriter){ 
+	http.SetCookie(w, &http.Cookie{
+		Name: csrf.PreSessionCookie, 
+		Value: "", 
+		Path: "/login", 
+		HttpOnly: true, 
+		Secure: h.cookie.Secure, 
+		SameSite: h.cookie.SameSite, 
+		MaxAge: -1,
+	})
 }
 
 func (h *AuthHandler) PostLogin(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +110,7 @@ func (h *AuthHandler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session.SetCookie(w, h.cookie, raw, time.Time{})
+	h.clearLoginToken(w)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -100,8 +123,8 @@ func (h *AuthHandler) PostLogout(w http.ResponseWriter, r *http.Request) {
 			// no return, keep user logged out
 		}
 	}
-		session.ClearCookie(w, h.cookie)
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	session.ClearCookie(w, h.cookie)
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (h *AuthHandler) GetLogin(w http.ResponseWriter, r *http.Request) {
@@ -112,4 +135,21 @@ func (h *AuthHandler) GetLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.renderLogin(w, http.StatusOK, "")
+}
+
+func (h *AuthHandler) issueLoginToken(w http.ResponseWriter) (string, error) {
+	token, err := csrf.NewPreSessionToken()
+	if err != nil {
+		return "", err
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:  csrf.PreSessionCookie,
+		Value: token,
+		Path: "/login", 
+		HttpOnly: true,
+		Secure: h.cookie.Secure, 
+		SameSite: h.cookie.SameSite,	
+	})
+	return token, nil 
 }

@@ -9,6 +9,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func (l Level) String() string {
+	switch l {
+	case LevelView:
+		return "view"
+	case LevelEdit:
+		return "edit"
+	}
+	return "none"
+}
+
 func ParseLevel(s string) (Level, error) {
 	switch s {
 	case "view":

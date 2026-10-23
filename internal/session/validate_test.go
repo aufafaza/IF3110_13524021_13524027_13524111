@@ -25,17 +25,27 @@ func wantUnauthenticated(t *testing.T, err error) {
 	}
 }
 
+func followRotation(raw string, v session.Validated) string {
+	if v.NewToken != "" {
+		return v.NewToken
+	}
+	return raw
+}
+
 func TestValidateValidSession(t *testing.T) {
 	m, _, clk := newManager()
 	raw := loginUser(t, m, 42)
 	clk.Advance(5 * time.Minute)
 
-	s, err := m.Validate(context.Background(), raw)
+	got, err := m.Validate(context.Background(), raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.UserID != 42 {
-		t.Errorf("UserID = %d, want 42", s.UserID)
+	if got.Session.UserID != 42 {
+		t.Errorf("UserID = %d, want 42", got.Session.UserID)
+	}
+	if got.NewToken != "" {
+		t.Errorf("NewToken = %q, want empty before the rotation interval", got.NewToken)
 	}
 }
 
@@ -84,9 +94,12 @@ func TestValidateActivityExtendsIdle(t *testing.T) {
 	raw := loginUser(t, m, 1)
 
 	clk.Advance(20 * time.Minute)
-	if _, err := m.Validate(context.Background(), raw); err != nil {
+	first, err := m.Validate(context.Background(), raw)
+	if err != nil {
 		t.Fatalf("first request: %v", err)
 	}
+	raw = followRotation(raw, first)
+
 	clk.Advance(20 * time.Minute) // 40 min after login, but only 20 since last use
 	if _, err := m.Validate(context.Background(), raw); err != nil {
 		t.Fatalf("second request should still be valid: %v", err)
@@ -100,9 +113,11 @@ func TestValidateAbsoluteExpiryEvenWhenActive(t *testing.T) {
 
 	for elapsed := 20 * time.Minute; elapsed < 8*time.Hour; elapsed += 20 * time.Minute {
 		clk.Advance(20 * time.Minute)
-		if _, err := m.Validate(ctx, raw); err != nil {
+		got, err := m.Validate(ctx, raw)
+		if err != nil {
 			t.Fatalf("active session rejected early at %v: %v", elapsed, err)
 		}
+		raw = followRotation(raw, got)
 	}
 
 	clk.Advance(20 * time.Minute) // exactly 8h after login

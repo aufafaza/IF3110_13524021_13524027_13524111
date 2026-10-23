@@ -1,0 +1,47 @@
+{{define "content"}}
+<h1>Groups</h1>
+<p class="muted">Database access is granted to groups only. A user's access to a database is the highest level granted by any of their groups; with no grant there is no access.</p>
+{{template "groups" .Data}}
+{{end}}
+
+{{define "groups"}}
+<div id="groups">
+	{{if .Message}}<p class="notice">{{.Message}}</p>{{end}}
+	{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+	<section>
+		<h2>Create group</h2>
+		<form class="row" hx-post="/admin/groups" hx-target="#groups" hx-swap="outerHTML">
+			<label>Name
+				<input name="name" required maxlength="64" autocomplete="off">
+			</label>
+			<button type="submit">Create group</button>
+		</form>
+	</section>
+
+	<section>
+		<h2>All groups</h2>
+		<table>
+			<thead>
+				<tr><th>Name</th><th>Members</th><th>Actions</th></tr>
+			</thead>
+			<tbody>
+			{{range .Groups}}
+				<tr>
+					<td><a href="/admin/groups/{{.ID}}">{{.Name}}</a></td>
+					<td>{{.MemberCount}}</td>
+					<td class="actions">
+						<a href="/admin/groups/{{.ID}}">Manage</a>
+						<form hx-post="/admin/groups/{{.ID}}/delete" hx-target="#groups" hx-swap="outerHTML" hx-confirm="Delete group {{.Name}}? Its members lose the access it granted.">
+							<button type="submit" class="danger">Delete</button>
+						</form>
+					</td>
+				</tr>
+			{{else}}
+				<tr><td colspan="3" class="muted">No groups yet.</td></tr>
+			{{end}}
+			</tbody>
+		</table>
+	</section>
+</div>
+{{end}}

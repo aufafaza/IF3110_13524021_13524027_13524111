@@ -11,20 +11,24 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 )
 
 const cookieName = "sid"
 
+var csrfSecret = []byte("0123456789abcdef")
+
 type fakeSessions struct {
 	sess        session.Session
+	newToken    string
 	validateErr error
 	logoutErr   error
 	loggedOut   []string
 }
 
-func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Session, error) {
-	return f.sess, f.validateErr
+func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Validated, error) {
+	return session.Validated{Session: f.sess, NewToken: f.newToken}, f.validateErr
 }
 
 func (f *fakeSessions) Logout(_ context.Context, raw string) error {
@@ -46,6 +50,8 @@ type result struct {
 	nextCalled bool
 	user       access.User
 	hasUser    bool
+	token      string
+	hasToken   bool
 }
 
 func run(t *testing.T, sessions *fakeSessions, users *fakeUsers, withCookie bool) result {
@@ -58,6 +64,7 @@ func run(t *testing.T, sessions *fakeSessions, users *fakeUsers, withCookie bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		res.nextCalled = true
 		res.user, res.hasUser = access.UserFromContext(r.Context())
+		res.token, res.hasToken = csrf.TokenFromContext(r.Context())
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -92,13 +99,16 @@ func TestAuthenticate_NoCookie(t *testing.T) {
 	if res.hasUser {
 		t.Error("user in context without a cookie")
 	}
+	if res.hasToken {
+		t.Error("csrf token in context without a cookie")
+	}
 	if clearsCookie(res.rec) {
 		t.Error("cookie cleared although none was sent")
 	}
 }
 
 func TestAuthenticate_ValidSession(t *testing.T) {
-	sessions := &fakeSessions{sess: session.Session{UserID: 7}}
+	sessions := &fakeSessions{sess: session.Session{UserID: 7, CSRFSecret: csrfSecret}}
 	users := &fakeUsers{user: activeUser()}
 
 	res := run(t, sessions, users, true)
@@ -112,6 +122,12 @@ func TestAuthenticate_ValidSession(t *testing.T) {
 	want := access.User{ID: 7, Username: "alice", IsPlatformAdmin: true}
 	if res.user != want {
 		t.Errorf("user = %+v, want %+v", res.user, want)
+	}
+	if !res.hasToken {
+		t.Fatal("no csrf token in context")
+	}
+	if wantToken := csrf.TokenFromSecret(csrfSecret); res.token != wantToken {
+		t.Errorf("csrf token = %q, want %q", res.token, wantToken)
 	}
 	if clearsCookie(res.rec) {
 		t.Error("cookie cleared for a valid session")
@@ -127,6 +143,9 @@ func TestAuthenticate_UnauthenticatedSession(t *testing.T) {
 	}
 	if res.hasUser {
 		t.Error("user in context for an invalid session")
+	}
+	if res.hasToken {
+		t.Error("csrf token in context for an invalid session")
 	}
 	if !clearsCookie(res.rec) {
 		t.Error("cookie was not cleared")
@@ -151,6 +170,9 @@ func TestAuthenticate_UserGone(t *testing.T) {
 			}
 			if res.hasUser {
 				t.Error("user in context")
+			}
+			if res.hasToken {
+				t.Error("csrf token in context")
 			}
 			if !clearsCookie(res.rec) {
 				t.Error("cookie was not cleared")
@@ -213,5 +235,62 @@ func TestAuthenticate_InfrastructureErrors(t *testing.T) {
 				t.Error("internal error detail leaked in response body")
 			}
 		})
+	}
+}
+
+func sessionCookie(rec *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestAuthenticate_RotatedTokenIsSentAsCookie(t *testing.T) {
+	sessions := &fakeSessions{
+		sess:     session.Session{UserID: 7, CSRFSecret: csrfSecret},
+		newToken: "rotated-token",
+	}
+	res := run(t, sessions, &fakeUsers{user: activeUser()}, true)
+
+	if !res.nextCalled || !res.hasUser {
+		t.Fatalf("nextCalled = %v, hasUser = %v; want true, true", res.nextCalled, res.hasUser)
+	}
+	c := sessionCookie(res.rec)
+	if c == nil {
+		t.Fatal("no session cookie sent after rotation")
+	}
+	if c.Value != "rotated-token" {
+		t.Errorf("cookie value = %q, want rotated-token", c.Value)
+	}
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie flags HttpOnly=%v Secure=%v SameSite=%v", c.HttpOnly, c.Secure, c.SameSite)
+	}
+}
+
+func TestAuthenticate_NoRotationSendsNoCookie(t *testing.T) {
+	sessions := &fakeSessions{sess: session.Session{UserID: 7, CSRFSecret: csrfSecret}}
+	res := run(t, sessions, &fakeUsers{user: activeUser()}, true)
+
+	if c := sessionCookie(res.rec); c != nil {
+		t.Errorf("unexpected session cookie without rotation: %+v", c)
+	}
+}
+
+func TestAuthenticate_RotatedTokenNotSentForInactiveUser(t *testing.T) {
+	sessions := &fakeSessions{
+		sess:     session.Session{UserID: 7},
+		newToken: "rotated-token",
+	}
+	users := &fakeUsers{user: auth.StoredUser{ID: 7, IsActive: false}}
+	res := run(t, sessions, users, true)
+
+	c := sessionCookie(res.rec)
+	if c == nil || c.Value != "" || c.MaxAge >= 0 {
+		t.Errorf("want the cookie cleared, got %+v", c)
+	}
+	if len(sessions.loggedOut) != 1 {
+		t.Errorf("session not revoked: %v", sessions.loggedOut)
 	}
 }

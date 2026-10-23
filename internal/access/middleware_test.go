@@ -151,3 +151,37 @@ func TestRequireDBAccessDoesNotCallCheckerWhenAnonymous(t *testing.T) {
 		t.Error("checker must not be consulted for an anonymous request")
 	}
 }
+
+func TestGuard_HTMXRequestsGetAnHXRedirectInsteadOfAHTMLRedirect(t *testing.T) {
+	g := access.NewGuard(&fakeChecker{}, "/login")
+	guards := map[string]func(http.Handler) http.Handler{
+		"RequireLogin":    g.RequireLogin,
+		"RequireAdmin":    g.RequireAdmin,
+		"RequireDBAccess": g.RequireDBAccess(access.LevelView),
+	}
+	for name, mw := range guards {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			h := mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("HX-Request", "true")
+			req.SetPathValue(access.DatabaseIDParam, "1")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if called {
+				t.Error("next handler ran for an anonymous request")
+			}
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", rec.Code)
+			}
+			if got := rec.Header().Get("HX-Redirect"); got != "/login" {
+				t.Errorf("HX-Redirect = %q, want /login", got)
+			}
+			if rec.Header().Get("Location") != "" {
+				t.Error("an htmx request must not get a Location redirect; the login page would be swapped into a fragment")
+			}
+		})
+	}
+}

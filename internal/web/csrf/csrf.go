@@ -8,7 +8,7 @@ import (
 )
 
 const preSessionBytes = 32
-
+const PreSessionCookie = "csrf_login"
 func TokenFromSecret(secret []byte) string {
 	if len(secret) == 0 {
 		return ""
