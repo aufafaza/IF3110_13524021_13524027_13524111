@@ -12,6 +12,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 )
 
@@ -302,5 +303,105 @@ func TestGetLogin_AlreadyLoggedIn(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `name="password"`) {
 		t.Error("login form rendered after redirect")
+	}
+}
+
+func findNamedCookie(rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestGetLogin_IssuesCSRFCookieMatchingFormField(t *testing.T) {
+	h := newHandler(&fakeAuth{}, &fakeSessions{})
+
+	rec := httptest.NewRecorder()
+	h.GetLogin(rec, httptest.NewRequest(http.MethodGet, "/login", nil))
+
+	c := findNamedCookie(rec, csrf.PreSessionCookie)
+	if c == nil {
+		t.Fatal("no csrf_login cookie set")
+	}
+	if c.Value == "" {
+		t.Error("csrf_login cookie is empty")
+	}
+	if !c.HttpOnly || !c.Secure {
+		t.Errorf("csrf_login flags HttpOnly=%v Secure=%v, want both true", c.HttpOnly, c.Secure)
+	}
+	if c.Path != "/login" {
+		t.Errorf("csrf_login Path = %q, want /login", c.Path)
+	}
+	if c.Domain != "" {
+		t.Errorf("csrf_login Domain = %q, want host-only", c.Domain)
+	}
+
+	wantField := `name="csrf_token" value="` + c.Value + `"`
+	if !strings.Contains(rec.Body.String(), wantField) {
+		t.Errorf("form field %s missing from body", wantField)
+	}
+}
+
+func TestGetLogin_TokenDiffersPerRequest(t *testing.T) {
+	h := newHandler(&fakeAuth{}, &fakeSessions{})
+
+	first := httptest.NewRecorder()
+	h.GetLogin(first, httptest.NewRequest(http.MethodGet, "/login", nil))
+	second := httptest.NewRecorder()
+	h.GetLogin(second, httptest.NewRequest(http.MethodGet, "/login", nil))
+
+	a := findNamedCookie(first, csrf.PreSessionCookie)
+	b := findNamedCookie(second, csrf.PreSessionCookie)
+	if a == nil || b == nil || a.Value == b.Value {
+		t.Error("expected a fresh token on every render")
+	}
+}
+
+func TestGetLogin_LoggedInGetsNoCSRFCookie(t *testing.T) {
+	h := newHandler(&fakeAuth{}, &fakeSessions{})
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req = req.WithContext(access.ContextWithUser(req.Context(), access.User{ID: 7}))
+	rec := httptest.NewRecorder()
+	h.GetLogin(rec, req)
+
+	if findNamedCookie(rec, csrf.PreSessionCookie) != nil {
+		t.Error("csrf_login cookie issued to an already logged-in user")
+	}
+}
+
+func TestPostLogin_FailedLoginIssuesFreshCSRFToken(t *testing.T) {
+	h := newHandler(&fakeAuth{err: auth.ErrInvalidCredentials}, &fakeSessions{})
+
+	rec := httptest.NewRecorder()
+	h.PostLogin(rec, postForm("/login", url.Values{"username": {"alice"}, "password": {"wrong"}}))
+
+	c := findNamedCookie(rec, csrf.PreSessionCookie)
+	if c == nil || c.Value == "" || c.MaxAge < 0 {
+		t.Fatalf("no fresh csrf_login cookie on the 401 page: %+v", c)
+	}
+	wantField := `name="csrf_token" value="` + c.Value + `"`
+	if !strings.Contains(rec.Body.String(), wantField) {
+		t.Errorf("form field %s missing from the 401 page", wantField)
+	}
+}
+
+func TestPostLogin_SuccessClearsCSRFCookie(t *testing.T) {
+	h := newHandler(&fakeAuth{user: access.User{ID: 7}}, &fakeSessions{rawToken: "new-token"})
+
+	rec := httptest.NewRecorder()
+	h.PostLogin(rec, postForm("/login", url.Values{"username": {"alice"}, "password": {"secret"}}))
+
+	c := findNamedCookie(rec, csrf.PreSessionCookie)
+	if c == nil {
+		t.Fatal("csrf_login cookie not cleared")
+	}
+	if c.Value != "" || c.MaxAge >= 0 {
+		t.Errorf("csrf_login not expired: value=%q maxAge=%d", c.Value, c.MaxAge)
+	}
+	if c.Path != "/login" {
+		t.Errorf("clearing cookie Path = %q, must match the issuing path /login", c.Path)
 	}
 }

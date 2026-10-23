@@ -9,6 +9,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
 
 type UserLookup interface {
@@ -75,7 +76,9 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			Username:        stored.Username,
 			IsPlatformAdmin: stored.IsPlatformAdmin,
 		}
-		next.ServeHTTP(w, r.WithContext(access.ContextWithUser(ctx, user)))
+		ctx = csrf.ContextWithToken(ctx, csrf.TokenFromSecret(sess.CSRFSecret))
+		ctx = access.ContextWithUser(ctx, user)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -4,17 +4,27 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 )
 
 const testCookie = "sid"
+
+var testSecret = []byte("0123456789abcdef")
+
+func formPost(target string, form url.Values) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
 
 type fakeSessions struct {
 	valid     bool
@@ -25,7 +35,7 @@ func (f *fakeSessions) Validate(_ context.Context, _ string) (session.Session, e
 	if !f.valid {
 		return session.Session{}, session.ErrUnauthenticated
 	}
-	return session.Session{UserID: 7}, nil
+	return session.Session{UserID: 7, CSRFSecret: testSecret}, nil
 }
 
 func (f *fakeSessions) Login(_ context.Context, _ int64) (string, error) { return "tok", nil }
@@ -89,8 +99,16 @@ func TestHome_LoggedInShowsUsername(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if !strings.Contains(rec.Body.String(), "alice") {
+	body := rec.Body.String()
+	if !strings.Contains(body, "alice") {
 		t.Error("username missing from home page")
+	}
+	if !strings.Contains(body, `<form method="post" action="/logout">`) {
+		t.Error("logout form missing from home page")
+	}
+	wantField := `name="csrf_token" value="` + csrf.TokenFromSecret(testSecret) + `"`
+	if !strings.Contains(body, wantField) {
+		t.Errorf("home page missing hidden field %s", wantField)
 	}
 }
 
@@ -116,7 +134,7 @@ func TestLoginPage_RedirectsWhenLoggedIn(t *testing.T) {
 
 func TestLogout_RevokesAndRedirects(t *testing.T) {
 	sessions := &fakeSessions{valid: true}
-	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req := formPost("/logout", url.Values{"csrf_token": {csrf.TokenFromSecret(testSecret)}})
 	req.AddCookie(&http.Cookie{Name: testCookie, Value: "tok"})
 	rec := httptest.NewRecorder()
 	newTestRouter(sessions).ServeHTTP(rec, req)
@@ -126,6 +144,59 @@ func TestLogout_RevokesAndRedirects(t *testing.T) {
 	}
 	if len(sessions.loggedOut) != 1 || sessions.loggedOut[0] != "tok" {
 		t.Errorf("revoked = %v, want [tok]", sessions.loggedOut)
+	}
+}
+
+func TestLogout_WithoutCSRFTokenIsForbidden(t *testing.T) {
+	sessions := &fakeSessions{valid: true}
+	req := formPost("/logout", url.Values{})
+	req.AddCookie(&http.Cookie{Name: testCookie, Value: "tok"})
+	rec := httptest.NewRecorder()
+	newTestRouter(sessions).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if len(sessions.loggedOut) != 0 {
+		t.Errorf("session revoked despite missing token: %v", sessions.loggedOut)
+	}
+}
+
+func TestLogout_WithWrongCSRFTokenIsForbidden(t *testing.T) {
+	sessions := &fakeSessions{valid: true}
+	req := formPost("/logout", url.Values{"csrf_token": {"forged"}})
+	req.AddCookie(&http.Cookie{Name: testCookie, Value: "tok"})
+	rec := httptest.NewRecorder()
+	newTestRouter(sessions).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if len(sessions.loggedOut) != 0 {
+		t.Errorf("session revoked despite wrong token: %v", sessions.loggedOut)
+	}
+}
+
+func TestPostLogin_WithoutCSRFCookieIsForbidden(t *testing.T) {
+	sessions := &fakeSessions{}
+	req := formPost("/login", url.Values{"username": {"alice"}, "password": {"secret"}, "csrf_token": {"x"}})
+	rec := httptest.NewRecorder()
+	newTestRouter(sessions).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestPostLogin_WithMatchingCSRFCookieSucceeds(t *testing.T) {
+	sessions := &fakeSessions{}
+	req := formPost("/login", url.Values{"username": {"alice"}, "password": {"secret"}, "csrf_token": {"pre"}})
+	req.AddCookie(&http.Cookie{Name: csrf.PreSessionCookie, Value: "pre"})
+	rec := httptest.NewRecorder()
+	newTestRouter(sessions).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
 	}
 }
 

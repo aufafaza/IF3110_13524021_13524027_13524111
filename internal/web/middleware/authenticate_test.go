@@ -11,10 +11,13 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 )
 
 const cookieName = "sid"
+
+var csrfSecret = []byte("0123456789abcdef")
 
 type fakeSessions struct {
 	sess        session.Session
@@ -46,6 +49,8 @@ type result struct {
 	nextCalled bool
 	user       access.User
 	hasUser    bool
+	token      string
+	hasToken   bool
 }
 
 func run(t *testing.T, sessions *fakeSessions, users *fakeUsers, withCookie bool) result {
@@ -58,6 +63,7 @@ func run(t *testing.T, sessions *fakeSessions, users *fakeUsers, withCookie bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		res.nextCalled = true
 		res.user, res.hasUser = access.UserFromContext(r.Context())
+		res.token, res.hasToken = csrf.TokenFromContext(r.Context())
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -92,13 +98,16 @@ func TestAuthenticate_NoCookie(t *testing.T) {
 	if res.hasUser {
 		t.Error("user in context without a cookie")
 	}
+	if res.hasToken {
+		t.Error("csrf token in context without a cookie")
+	}
 	if clearsCookie(res.rec) {
 		t.Error("cookie cleared although none was sent")
 	}
 }
 
 func TestAuthenticate_ValidSession(t *testing.T) {
-	sessions := &fakeSessions{sess: session.Session{UserID: 7}}
+	sessions := &fakeSessions{sess: session.Session{UserID: 7, CSRFSecret: csrfSecret}}
 	users := &fakeUsers{user: activeUser()}
 
 	res := run(t, sessions, users, true)
@@ -112,6 +121,12 @@ func TestAuthenticate_ValidSession(t *testing.T) {
 	want := access.User{ID: 7, Username: "alice", IsPlatformAdmin: true}
 	if res.user != want {
 		t.Errorf("user = %+v, want %+v", res.user, want)
+	}
+	if !res.hasToken {
+		t.Fatal("no csrf token in context")
+	}
+	if wantToken := csrf.TokenFromSecret(csrfSecret); res.token != wantToken {
+		t.Errorf("csrf token = %q, want %q", res.token, wantToken)
 	}
 	if clearsCookie(res.rec) {
 		t.Error("cookie cleared for a valid session")
@@ -127,6 +142,9 @@ func TestAuthenticate_UnauthenticatedSession(t *testing.T) {
 	}
 	if res.hasUser {
 		t.Error("user in context for an invalid session")
+	}
+	if res.hasToken {
+		t.Error("csrf token in context for an invalid session")
 	}
 	if !clearsCookie(res.rec) {
 		t.Error("cookie was not cleared")
@@ -151,6 +169,9 @@ func TestAuthenticate_UserGone(t *testing.T) {
 			}
 			if res.hasUser {
 				t.Error("user in context")
+			}
+			if res.hasToken {
+				t.Error("csrf token in context")
 			}
 			if !clearsCookie(res.rec) {
 				t.Error("cookie was not cleared")
