@@ -17,10 +17,19 @@ func NewGuard(checker Checker, loginPath string) *Guard {
 	return &Guard{checker: checker, loginPath: loginPath}
 }
 
+func (g *Guard) toLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", g.loginPath)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, g.loginPath, http.StatusSeeOther)
+}
+
 func (g *Guard) RequireLogin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := UserFromContext(r.Context()); !ok {
-			http.Redirect(w, r, g.loginPath, http.StatusSeeOther)
+			g.toLogin(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -31,7 +40,7 @@ func (g *Guard) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := UserFromContext(r.Context())
 		if !ok {
-			http.Redirect(w, r, g.loginPath, http.StatusSeeOther)
+			g.toLogin(w, r)
 			return
 		}
 		if !user.IsPlatformAdmin {
@@ -47,7 +56,7 @@ func (g *Guard) RequireDBAccess(min Level) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user, ok := UserFromContext(r.Context())
 			if !ok {
-				http.Redirect(w, r, g.loginPath, http.StatusSeeOther)
+				g.toLogin(w, r)
 				return
 			}
 
