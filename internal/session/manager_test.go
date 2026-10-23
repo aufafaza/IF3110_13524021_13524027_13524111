@@ -20,6 +20,9 @@ type fakeStore struct {
 	createErr error
 	getErr    error
 	touchErr  error
+	rotateErr error
+
+	rotateCalls int
 }
 
 func (f *fakeStore) Create(ctx context.Context, s session.Session) error {
@@ -78,8 +81,22 @@ func (f *fakeStore) RevokeAllForUser(ctx context.Context, userID int64, now time
 	return nil
 }
 
-func (f *fakeStore) Rotate(context.Context, []byte, []byte, time.Time, time.Time) error {
-	panic("unused")
+func (f *fakeStore) Rotate(ctx context.Context, oldHash, newHash []byte, now, graceUntil time.Time) error {
+	f.rotateCalls++
+	if f.rotateErr != nil {
+		return f.rotateErr
+	}
+	for i := range f.sessions {
+		if bytes.Equal(f.sessions[i].IDHash, oldHash) {
+			until := graceUntil
+			f.sessions[i].PrevIDHash = oldHash
+			f.sessions[i].PrevValidUntil = &until
+			f.sessions[i].IDHash = newHash
+			f.sessions[i].RotatedAt = now
+			return nil
+		}
+	}
+	return session.ErrNotFound
 }
 
 var testConfig = session.Config{

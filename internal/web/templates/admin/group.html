@@ -1,0 +1,99 @@
+{{define "content"}}
+<p><a href="/admin/groups">&larr; All groups</a></p>
+<h1>{{.Data.Group.Name}}</h1>
+{{template "members" .Data.Members}}
+{{template "grants" .Data.Grants}}
+{{end}}
+
+{{define "members"}}
+<section id="members">
+	<h2>Members</h2>
+	{{if .Message}}<p class="notice">{{.Message}}</p>{{end}}
+	{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+	{{if .Candidates}}
+	<form class="row" hx-post="/admin/groups/{{.GroupID}}/members" hx-target="#members" hx-swap="outerHTML">
+		<label>Add user
+			<select name="user_id" required>
+				<option value="">Choose a user</option>
+				{{range .Candidates}}<option value="{{.ID}}">{{.Username}}</option>{{end}}
+			</select>
+		</label>
+		<button type="submit">Add to group</button>
+	</form>
+	{{else}}
+	<p class="muted">Every active user is already a member.</p>
+	{{end}}
+
+	<table>
+		<thead>
+			<tr><th>Username</th><th>Status</th><th>Actions</th></tr>
+		</thead>
+		<tbody>
+		{{range .Members}}
+			<tr>
+				<td>{{.Username}}</td>
+				<td>{{if .IsActive}}Active{{else}}Inactive{{end}}</td>
+				<td>
+					<form hx-post="/admin/groups/{{$.GroupID}}/members/{{.ID}}/remove" hx-target="#members" hx-swap="outerHTML" hx-confirm="Remove {{.Username}} from this group? Their sessions end immediately.">
+						<button type="submit" class="danger">Remove</button>
+					</form>
+				</td>
+			</tr>
+		{{else}}
+			<tr><td colspan="3" class="muted">No members.</td></tr>
+		{{end}}
+		</tbody>
+	</table>
+</section>
+{{end}}
+
+{{define "grants"}}
+<section id="grants">
+	<h2>Database access</h2>
+	{{if .Message}}<p class="notice">{{.Message}}</p>{{end}}
+	{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+	{{if .Databases}}
+	<form class="row" hx-post="/admin/groups/{{.GroupID}}/grants" hx-target="#grants" hx-swap="outerHTML">
+		<label>Database
+			<select name="database_id" required>
+				<option value="">Choose a database</option>
+				{{range .Databases}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+			</select>
+		</label>
+		<label>Access
+			<select name="level" required>
+				<option value="view">View Only</option>
+				<option value="edit">View + Edit</option>
+			</select>
+		</label>
+		<button type="submit">Grant access</button>
+	</form>
+	<p class="muted">Granting a database that already has a grant changes its level.</p>
+	{{else}}
+	<p class="muted">No databases are registered yet.</p>
+	{{end}}
+
+	<table>
+		<thead>
+			<tr><th>Database</th><th>Access</th><th>Actions</th></tr>
+		</thead>
+		<tbody>
+		{{range .Grants}}
+			<tr>
+				<td>{{.DatabaseName}}</td>
+				<td>{{levelLabel .Level}}</td>
+				<td>
+					<form hx-post="/admin/groups/{{$.GroupID}}/grants/{{.DatabaseID}}/remove" hx-target="#grants" hx-swap="outerHTML" hx-confirm="Remove this group's access to {{.DatabaseName}}? Its members' sessions end immediately.">
+						<button type="submit" class="danger">Remove</button>
+					</form>
+				</td>
+			</tr>
+		{{else}}
+			<tr><td colspan="3" class="muted">This group has no database access.</td></tr>
+		{{end}}
+		</tbody>
+	</table>
+</section>
+{{end}}
