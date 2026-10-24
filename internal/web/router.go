@@ -16,6 +16,7 @@ type Deps struct {
 	Auth         *handlers.AuthHandler
 	Authenticate *middleware.Authenticator
 	Guard        *access.Guard
+	Databases    *handlers.DatabaseHandler
 }
 
 func New(d Deps) http.Handler {
@@ -28,6 +29,8 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("POST /logout", d.Auth.PostLogout)
 
 	mux.Handle("GET /{$}", d.Guard.RequireLogin(http.HandlerFunc(home)))
+
+	registerDatabaseRoutes(mux, d)
 
 	return d.Authenticate.Middleware(csrf.Protect("csrf_login")(mux))
 }
@@ -42,6 +45,7 @@ var homeTmpl = template.Must(template.New("home").Parse(`<!doctype html>
 <head><meta charset="utf-8"><title>Home</title></head>
 <body>
 <p>Signed in as {{.Username}}{{if .IsPlatformAdmin}} (platform admin){{end}}</p>
+<p><a href="/databases">Databases</a>{{if .IsPlatformAdmin}} | <a href="/admin/databases">Manage databases</a>{{end}}</p>
 <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 <form method="post" action="/logout"><button type="submit">Log out</button></form>
 </body>

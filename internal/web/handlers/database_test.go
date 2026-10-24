@@ -57,7 +57,9 @@ type fakeViewer struct {
 	rowsPages []int
 }
 
-func (f *fakeViewer) Tables(context.Context, int64) ([]dbmanager.Table, error) { return f.tables, f.err }
+func (f *fakeViewer) Tables(context.Context, int64) ([]dbmanager.Table, error) {
+	return f.tables, f.err
+}
 func (f *fakeViewer) TableInfo(context.Context, int64, string, string) (dbmanager.TableInfo, error) {
 	return f.info, f.err
 }
@@ -98,7 +100,7 @@ func TestDatabases_SelectListsOnlyAccessible(t *testing.T) {
 	rec := serve(rig.h.SelectPage, adminRequest(http.MethodGet, "/databases", nil, nil))
 
 	body := rec.Body.String()
-	if rec.Code != http.StatusOK || !strings.Contains(body, "sales") || !strings.Contains(body, "View + Edit") {
+	if rec.Code != http.StatusOK || !strings.Contains(body, "sales") || !strings.Contains(body, "View &#43; Edit") {
 		t.Fatalf("status %d, body missing accessible database", rec.Code)
 	}
 	if strings.Contains(body, "payroll") {
