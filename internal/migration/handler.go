@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	migrationtemplates "github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates/migration"
 )
 
@@ -52,9 +53,12 @@ func NewHandler(service *Service, opts ...HandlerOption) *Handler {
 	h := &Handler{
 		service:     service,
 		extractUser: UserFromContext,
-		extractCSRF: func(*http.Request) string { return "" },
-		templates:   mustParseTemplates(migrationtemplates.FS),
-		mux:         http.NewServeMux(),
+		extractCSRF: func(r *http.Request) string {
+			tok, _ := csrf.TokenFromContext(r.Context())
+			return tok
+		},
+		templates: mustParseTemplates(migrationtemplates.FS),
+		mux:       http.NewServeMux(),
 	}
 	for _, opt := range opts {
 		opt(h)

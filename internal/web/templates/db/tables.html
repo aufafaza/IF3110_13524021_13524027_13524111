@@ -1,6 +1,6 @@
 {{define "content"}}
 <h1>{{.Data.DatabaseName}}</h1>
-<p class="muted">Your access: {{levelLabel .Data.Level}}. <a href="/databases">All databases</a></p>
+<p class="muted">Your access: {{levelLabel .Data.Level}}. <a href="/databases">All databases</a> &middot; <a href="/databases/{{.Data.DatabaseID}}/migrations">Migrations</a></p>
 <div class="viewer">
 	{{template "sidebar" .Data}}
 	<div class="viewer-main">

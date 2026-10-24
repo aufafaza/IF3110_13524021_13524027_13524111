@@ -7,6 +7,8 @@ import (
 	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 )
 
 type AccessLevel int
@@ -108,12 +110,26 @@ type User struct {
 type userContextKey struct{}
 
 func WithUser(ctx context.Context, u User) context.Context {
+	ctx = access.ContextWithUser(ctx, access.User{
+		ID:              u.ID,
+		Username:        u.Username,
+		IsPlatformAdmin: u.IsPlatformAdmin,
+	})
 	return context.WithValue(ctx, userContextKey{}, u)
 }
 
 func UserFromContext(ctx context.Context) (User, bool) {
-	u, ok := ctx.Value(userContextKey{}).(User)
-	return u, ok
+	if u, ok := ctx.Value(userContextKey{}).(User); ok {
+		return u, true
+	}
+	if au, ok := access.UserFromContext(ctx); ok {
+		return User{
+			ID:              au.ID,
+			Username:        au.Username,
+			IsPlatformAdmin: au.IsPlatformAdmin,
+		}, true
+	}
+	return User{}, false
 }
 
 type UserExtractor func(ctx context.Context) (User, bool)

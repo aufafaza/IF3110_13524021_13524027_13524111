@@ -450,7 +450,7 @@ func TestAdminRoutes_RejectWrongMethods(t *testing.T) {
 
 func TestStatic_ServedWithoutLogin(t *testing.T) {
 	rec := httptest.NewRecorder()
-	newTestRouter(&fakeSessions{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/app.css", nil))
+	newTestRouter(t, &fakeSessions{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/app.css", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
