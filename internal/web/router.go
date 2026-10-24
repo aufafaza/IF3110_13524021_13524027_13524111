@@ -10,6 +10,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/static"
 )
 
 type Deps struct {
@@ -17,12 +18,15 @@ type Deps struct {
 	Authenticate *middleware.Authenticator
 	Guard        *access.Guard
 	Databases    *handlers.DatabaseHandler
+	Admin        *handlers.AdminHandler
 }
 
 func New(d Deps) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", health)
+
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static.FS)))
 
 	mux.HandleFunc("GET /login", d.Auth.GetLogin)
 	mux.HandleFunc("POST /login", d.Auth.PostLogin)
@@ -31,6 +35,7 @@ func New(d Deps) http.Handler {
 	mux.Handle("GET /{$}", d.Guard.RequireLogin(http.HandlerFunc(home)))
 
 	registerDatabaseRoutes(mux, d)
+	registerAdminRoutes(mux, d)
 
 	return d.Authenticate.Middleware(csrf.Protect("csrf_login")(mux))
 }

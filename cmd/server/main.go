@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/config"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
@@ -72,11 +73,14 @@ func main() {
 
 	checker := access.NewPostgresChecker(pool)
 
+	adminService := admin.NewService(admin.NewPostgresStore(pool), auth.NewArgon2idHasher(), sessions)
+
 	handler := web.New(web.Deps{
 		Auth:         handlers.NewAuthHandler(authService, sessions, cookie),
 		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
 		Guard:        access.NewGuard(checker, "/login"),
 		Databases:    handlers.NewDatabaseHandler(registry, dbmanager.NewViewer(registry), checker, nil, tmpl),
+		Admin:        handlers.NewAdminHandler(adminService, tmpl),
 	})
 
 	srv := &http.Server{
