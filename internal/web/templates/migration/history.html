@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Migration History — Database #{{.DatabaseID}}</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #1f2937; background: #f9fafb; }
+        .container { max-width: 1100px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+        h1, h2 { margin: 0 0 0.75rem 0; }
+        .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
+        .badge-applied { background: #d1fae5; color: #065f46; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-draft { background: #fef3c7; color: #92400e; }
+        .badge-role { background: #e0e7ff; color: #3730a3; }
+        .btn { display: inline-block; padding: 0.5rem 1rem; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 0.9rem; cursor: pointer; border: 1px solid transparent; }
+        .btn-primary { background: #2563eb; color: #ffffff; }
+        .btn-secondary { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; }
+        th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #e5e7eb; font-size: 0.92rem; }
+        th { background: #f9fafb; font-weight: 600; color: #4b5563; }
+        .empty { color: #6b7280; font-style: italic; padding: 1rem 0; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <div>
+            <h1>Database #{{.DatabaseID}} — Migrations</h1>
+            <span class="badge badge-role">Access: {{if .CanEdit}}View + Edit{{else}}View Only{{end}}</span>
+        </div>
+        <div>
+            <a class="btn btn-secondary" href="/databases/{{.DatabaseID}}">Back to Database</a>
+            {{if .CanEdit}}
+            <a class="btn btn-primary" href="/databases/{{.DatabaseID}}/migrations/new">+ New Migration</a>
+            {{end}}
+        </div>
+    </header>
+
+    <h2>Linear Migration History</h2>
+    {{if .Executed}}
+    <table>
+        <thead>
+            <tr>
+                <th>Version</th>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Created By</th>
+                <th>Executed By</th>
+                <th>Executed At</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Executed}}
+            <tr>
+                <td class="mono">v{{derefInt .Version}}</td>
+                <td>{{.Title}}</td>
+                <td>
+                    <span class="badge badge-{{.Status}}">{{.Status}}</span>
+                </td>
+                <td>{{if .CreatedByUsername}}{{.CreatedByUsername}}{{else}}User #{{.CreatedBy}}{{end}}</td>
+                <td>{{if .ExecutedByUsername}}{{derefStr .ExecutedByUsername}}{{else if .ExecutedBy}}User #{{derefInt64 .ExecutedBy}}{{else}}-{{end}}</td>
+                <td>{{formatTimePtr .ExecutedAt}}</td>
+                <td>
+                    <a class="btn btn-secondary" href="/databases/{{$.DatabaseID}}/migrations/{{.ID}}">Detail</a>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No migrations have been executed on this database yet.</p>
+    {{end}}
+
+    <h2>Draft Migrations</h2>
+    {{if .Drafts}}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Created By</th>
+                <th>Created At</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Drafts}}
+            <tr>
+                <td class="mono">#{{.ID}}</td>
+                <td>{{.Title}}</td>
+                <td><span class="badge badge-draft">{{.Status}}</span></td>
+                <td>{{if .CreatedByUsername}}{{.CreatedByUsername}}{{else}}User #{{.CreatedBy}}{{end}}</td>
+                <td>{{formatTime .CreatedAt}}</td>
+                <td>
+                    <a class="btn btn-secondary" href="/databases/{{$.DatabaseID}}/migrations/{{.ID}}">
+                        {{if $.CanEdit}}Review / Edit / Execute{{else}}Detail{{end}}
+                    </a>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No pending draft migrations.</p>
+    {{end}}
+</div>
+</body>
+</html>

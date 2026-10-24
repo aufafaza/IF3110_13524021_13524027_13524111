@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{if .IsEdit}}Edit Draft Migration #{{.Migration.ID}}{{else}}New Migration{{end}} — Database #{{.DatabaseID}}</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #1f2937; background: #f9fafb; }
+        .container { max-width: 960px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+        .form-group { margin-bottom: 1.25rem; }
+        label { display: block; font-weight: 600; margin-bottom: 0.4rem; }
+        input[type="text"], textarea { width: 100%; padding: 0.65rem; border: 1px solid #d1d5db; border-radius: 6px; font-size: 0.95rem; box-sizing: border-box; }
+        textarea.sql-editor { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 240px; background: #111827; color: #f9fafb; line-height: 1.45; }
+        .btn { display: inline-block; padding: 0.55rem 1.1rem; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 0.9rem; cursor: pointer; border: 1px solid transparent; margin-right: 0.5rem; }
+        .btn-primary { background: #2563eb; color: #ffffff; }
+        .btn-secondary { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+        .btn-danger { background: #dc2626; color: #ffffff; }
+        .alert-error { background: #fee2e2; border: 1px solid #f87171; color: #991b1b; padding: 0.85rem 1rem; border-radius: 6px; margin-bottom: 1.25rem; }
+        .preview-box { background: #f8fafc; border: 1px solid #cbd5e1; padding: 1rem 1.25rem; border-radius: 6px; margin-top: 1.5rem; }
+        pre { background: #1e293b; color: #e2e8f0; padding: 0.75rem; border-radius: 6px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        .notice { font-size: 0.85rem; color: #4b5563; margin-top: 0.35rem; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>{{if .IsEdit}}Edit Draft Migration #{{.Migration.ID}}{{else}}Create SQL Migration{{end}} (Database #{{.DatabaseID}})</h1>
+        <a class="btn btn-secondary" href="/databases/{{.DatabaseID}}/migrations">Back to History</a>
+    </header>
+
+    {{if .Error}}
+    <div class="alert-error" role="alert">
+        <strong>Error:</strong> {{.Error}}
+    </div>
+    {{end}}
+
+    <form method="POST" action="{{if .IsEdit}}/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}{{else}}/databases/{{.DatabaseID}}/migrations{{end}}">
+        {{if .CSRFToken}}
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        {{end}}
+
+        <div class="form-group">
+            <label for="title">Migration Title</label>
+            <input type="text" id="title" name="title" value="{{.Title}}" placeholder="e.g. Create orders and order_items tables" required>
+        </div>
+
+        <div class="form-group">
+            <label for="sql">SQL Statements (executed atomically inside BEGIN ... COMMIT)</label>
+            <textarea id="sql" name="sql" class="sql-editor" placeholder="CREATE TABLE example (&#10;    id BIGSERIAL PRIMARY KEY&#10;);" required>{{.SQL}}</textarea>
+            <p class="notice">Non-transactional statements (such as <code>CREATE INDEX CONCURRENTLY</code> or <code>VACUUM</code>) are rejected automatically.</p>
+        </div>
+
+        <div>
+            <button type="submit" name="action" value="preview" class="btn btn-secondary">Preview SQL</button>
+            <button type="submit" name="action" value="save" class="btn btn-primary">Save Draft</button>
+        </div>
+    </form>
+
+    {{if .Preview}}
+    <div class="preview-box">
+        <h2>SQL Preview ({{.Preview.StatementCount}} statement{{if ne .Preview.StatementCount 1}}s{{end}})</h2>
+        <p>The following statements passed validation and will run inside a single PostgreSQL transaction:</p>
+        <ol>
+            {{range .Preview.Statements}}
+            <li><pre><code>{{.}}</code></pre></li>
+            {{end}}
+        </ol>
+
+        {{if .IsEdit}}
+        <form method="POST" action="/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}/execute" style="margin-top: 1rem;">
+            {{if .CSRFToken}}
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            {{end}}
+            <label style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
+                <input type="checkbox" name="confirm" value="true" required>
+                I have reviewed the SQL preview and confirm executing this migration on Database #{{.DatabaseID}}.
+            </label>
+            <button type="submit" class="btn btn-danger">Execute Migration Now</button>
+        </form>
+        {{else}}
+        <p class="notice">Click <strong>Save Draft</strong> above to persist this migration and proceed to execution confirmation.</p>
+        {{end}}
+    </div>
+    {{end}}
+</div>
+</body>
+</html>

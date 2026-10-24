@@ -11,6 +11,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/config"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
@@ -75,6 +76,14 @@ func main() {
 
 	adminService := admin.NewService(admin.NewPostgresStore(pool), auth.NewArgon2idHasher(), sessions)
 
+	migrationRepo := migration.NewPostgresRepository(pool)
+	migrationRunner := migration.NewRunner(
+		migrationRepo,
+		migration.NewTargetPostgresLocker(registry),
+		migration.NewTargetPostgresExecutor(registry),
+	)
+	migrationService := migration.NewService(migrationRepo, migrationRunner, migration.AdaptChecker(checker))
+
 	handler := web.New(web.Deps{
 		Auth:         handlers.NewAuthHandler(authService, sessions, cookie),
 		Home:         handlers.NewHomeHandler(tmpl),
@@ -82,7 +91,7 @@ func main() {
 		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
 		Guard:        access.NewGuard(checker, "/login"),
 		Databases:    handlers.NewDatabaseHandler(registry, dbmanager.NewViewer(registry), checker, nil, tmpl),
-		Admin:        handlers.NewAdminHandler(adminService, tmpl),
+		Migrations:   migration.NewHandler(migrationService),
 	})
 
 	srv := &http.Server{

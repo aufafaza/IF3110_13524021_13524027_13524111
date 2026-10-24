@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
@@ -18,6 +19,7 @@ type Deps struct {
 	Authenticate *middleware.Authenticator
 	Guard        *access.Guard
 	Databases    *handlers.DatabaseHandler // optional; nil leaves the database routes out
+	Migrations   *migration.Handler        // optional; nil leaves the migration routes out
 }
 
 func New(d Deps) http.Handler {
@@ -50,6 +52,9 @@ func New(d Deps) http.Handler {
 	adminRoute("POST /admin/groups/{id}/grants/{dbID}/remove", d.Admin.RemoveGrant)
 
 	registerDatabaseRoutes(mux, d)
+	if d.Migrations != nil {
+		d.Migrations.RegisterRoutes(mux)
+	}
 
 	return d.Authenticate.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux))
 }
