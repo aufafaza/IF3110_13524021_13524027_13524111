@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - Database Platform</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{.CSRFToken}}"}'>
+<header class="topbar">
+	<a class="brand" href="/">Database Platform</a>
+	<nav>
+		<a href="/databases">Databases</a>
+		{{if .User.IsPlatformAdmin}}
+		<a href="/admin/users">Users</a>
+		<a href="/admin/groups">Groups</a>
+		<a href="/admin/databases">Manage databases</a>
+		{{end}}
+	</nav>
+	<form class="logout" method="post" action="/logout">
+		<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+		<span>{{.User.Username}}</span>
+		<button type="submit">Log out</button>
+	</form>
+</header>
+<main>
+<div id="flash" role="alert"></div>
+{{template "content" .}}
+</main>
+</body>
+</html>

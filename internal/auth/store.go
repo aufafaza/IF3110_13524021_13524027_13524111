@@ -26,7 +26,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
-type NewUser struct { 
+type CreateUserParams struct { 
 	Username				string 
 	PasswordHash		string
 	IsPlatformAdmin	bool
@@ -74,7 +74,7 @@ func (s *PostgresStore) FindByID(ctx context.Context, ID int64) (user StoredUser
 
 }
 
-func (s *PostgresStore) Create(ctx context.Context, u NewUser) (int64, error) {
+func (s *PostgresStore) Create(ctx context.Context, u CreateUserParams) (int64, error) {
 
 	var id int64 
 	err := s.pool.QueryRow(ctx, 

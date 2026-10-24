@@ -38,15 +38,15 @@ type PasswordHasher interface {
 }
 
 type Argon2idHasher struct {
-	Params Params
+	Argon2Params Params
 }
 
 func NewArgon2idHasher() Argon2idHasher {
-	return Argon2idHasher{Params: DefaultParams}
+	return Argon2idHasher{Argon2Params: DefaultParams}
 }
 
 func (h Argon2idHasher) Hash(password string) (string, error) {
-	return HashPassword(password, &h.Params)
+	return HashPassword(password, &h.Argon2Params)
 }
 
 func (h Argon2idHasher) Verify(password, encodedHash string) (bool, error) {

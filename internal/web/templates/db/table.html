@@ -1,0 +1,81 @@
+{{define "content"}}
+<h1>{{.Data.DatabaseName}} <span class="muted">/ {{.Data.Schema}}.{{.Data.Table}}</span></h1>
+<p class="muted">Your access: {{levelLabel .Data.Level}}. <a href="/databases">All databases</a></p>
+<div class="viewer">
+	{{template "sidebar" .Data}}
+	<div class="viewer-main">
+		<div class="tabs" role="tablist">
+			{{range .Data.Tabs}}
+			<a href="{{.URL}}" role="tab"{{if .Active}} class="active" aria-selected="true"{{end}}>{{.Label}}</a>
+			{{end}}
+		</div>
+
+		<section>
+		{{if eq .Data.Tab "columns"}}
+			<table>
+				<thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Default</th></tr></thead>
+				<tbody>
+				{{range .Data.Info.Columns}}
+					<tr>
+						<td>{{.Name}}</td>
+						<td>{{.Type}}</td>
+						<td>{{if .Nullable}}yes{{else}}no{{end}}</td>
+						<td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="muted">-</span>{{end}}</td>
+					</tr>
+				{{end}}
+				</tbody>
+			</table>
+		{{else if eq .Data.Tab "constraints"}}
+			<table>
+				<thead><tr><th>Name</th><th>Type</th><th>Definition</th></tr></thead>
+				<tbody>
+				{{range .Data.Info.Constraints}}
+					<tr><td>{{.Name}}</td><td>{{.Type}}</td><td><code>{{.Definition}}</code></td></tr>
+				{{else}}
+					<tr><td colspan="3" class="muted">No constraints.</td></tr>
+				{{end}}
+				</tbody>
+			</table>
+		{{else if eq .Data.Tab "indexes"}}
+			<table>
+				<thead><tr><th>Name</th><th>Unique</th><th>Method</th><th>Definition</th></tr></thead>
+				<tbody>
+				{{range .Data.Info.Indexes}}
+					<tr>
+						<td>{{.Name}}</td>
+						<td>{{if .Unique}}yes{{else}}no{{end}}</td>
+						<td>{{.Method}}</td>
+						<td><code>{{.Definition}}</code></td>
+					</tr>
+				{{else}}
+					<tr><td colspan="4" class="muted">No indexes.</td></tr>
+				{{end}}
+				</tbody>
+			</table>
+		{{else}}
+			<div class="scroll">
+			<table>
+				<thead>
+					<tr>{{range .Data.Data.Columns}}<th>{{.}}</th>{{end}}</tr>
+				</thead>
+				<tbody>
+				{{range .Data.Data.Rows}}
+					<tr>
+					{{range .}}<td>{{if .Null}}<span class="null">NULL</span>{{else}}{{.Text}}{{end}}</td>{{end}}
+					</tr>
+				{{else}}
+					<tr><td colspan="{{len .Data.Data.Columns}}" class="muted">This table has no rows.</td></tr>
+				{{end}}
+				</tbody>
+			</table>
+			</div>
+			<p class="pager">
+				{{if .Data.PrevURL}}<a href="{{.Data.PrevURL}}">&larr; Previous</a>{{end}}
+				<span class="muted">Page {{.Data.Data.Page}}</span>
+				{{if .Data.NextURL}}<a href="{{.Data.NextURL}}">Next &rarr;</a>{{end}}
+			</p>
+		{{end}}
+		</section>
+	</div>
+</div>
+{{end}}
