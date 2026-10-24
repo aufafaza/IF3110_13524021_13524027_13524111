@@ -17,6 +17,7 @@ type Deps struct {
 	Admin        *handlers.AdminHandler
 	Authenticate *middleware.Authenticator
 	Guard        *access.Guard
+	Databases    *handlers.DatabaseHandler // optional; nil leaves the database routes out
 }
 
 func New(d Deps) http.Handler {
@@ -47,6 +48,8 @@ func New(d Deps) http.Handler {
 	adminRoute("POST /admin/groups/{id}/members/{userID}/remove", d.Admin.RemoveMember)
 	adminRoute("POST /admin/groups/{id}/grants", d.Admin.SetGrant)
 	adminRoute("POST /admin/groups/{id}/grants/{dbID}/remove", d.Admin.RemoveGrant)
+
+	registerDatabaseRoutes(mux, d)
 
 	return d.Authenticate.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux))
 }

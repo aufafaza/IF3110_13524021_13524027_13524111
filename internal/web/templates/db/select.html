@@ -1,0 +1,21 @@
+{{define "content"}}
+<h1>Select database</h1>
+<p class="muted">Databases you can open through your groups.</p>
+<section>
+	<table>
+		<thead>
+			<tr><th>Name</th><th>Your access</th></tr>
+		</thead>
+		<tbody>
+		{{range .Data.Databases}}
+			<tr>
+				<td><a href="/databases/{{.ID}}">{{.Name}}</a></td>
+				<td>{{levelLabel .Level}}</td>
+			</tr>
+		{{else}}
+			<tr><td colspan="2" class="muted">No databases are available to you yet. Ask a platform admin to add your group to one.</td></tr>
+		{{end}}
+		</tbody>
+	</table>
+</section>
+{{end}}

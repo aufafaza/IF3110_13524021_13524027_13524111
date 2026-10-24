@@ -1,0 +1,12 @@
+{{define "content"}}
+<h1>{{.Data.DatabaseName}}</h1>
+<p class="muted">Your access: {{levelLabel .Data.Level}}. <a href="/databases">All databases</a></p>
+<div class="viewer">
+	{{template "sidebar" .Data}}
+	<div class="viewer-main">
+		<section>
+			<p class="muted">Pick a table to see its columns, constraints, indexes and data.</p>
+		</section>
+	</div>
+</div>
+{{end}}

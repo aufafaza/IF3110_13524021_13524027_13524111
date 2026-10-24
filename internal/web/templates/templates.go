@@ -12,10 +12,14 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
 
-//go:embed layout.html home.html admin/*.html
+//go:embed layout.html home.html admin/*.html db/*.html partials/*.html
 var files embed.FS
 
-var pageNames = []string{"home", "admin/users", "admin/groups", "admin/group"}
+var pageNames = []string{
+	"home", "admin/users", "admin/groups", "admin/group",
+	"admin/databases", "admin/database",
+	"db/select", "db/tables", "db/table", "db/error",
+}
 
 type View struct {
 	Title     string
@@ -39,11 +43,14 @@ func LevelLabel(l access.Level) string {
 }
 
 func New() (*Set, error) {
-	funcs := template.FuncMap{"levelLabel": LevelLabel}
+	funcs := template.FuncMap{
+		"levelLabel": LevelLabel,
+		"list":       func(v ...string) []string { return v },
+	}
 
 	pages := make(map[string]*template.Template, len(pageNames))
 	for _, name := range pageNames {
-		t, err := template.New("layout.html").Funcs(funcs).ParseFS(files, "layout.html", name+".html")
+		t, err := template.New("layout.html").Funcs(funcs).ParseFS(files, "layout.html", "partials/sidebar.html", name+".html")
 		if err != nil {
 			return nil, fmt.Errorf("templates: parse %s: %w", name, err)
 		}

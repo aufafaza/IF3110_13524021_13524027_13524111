@@ -1,8 +1,7 @@
 {{define "content"}}
 <h1>Welcome, {{.User.Username}}</h1>
 {{if .User.IsPlatformAdmin}}
-<p>You are a platform admin. Manage <a href="/admin/users">users</a> and <a href="/admin/groups">groups</a>.</p>
-{{else}}
-<p>Databases you have access to will appear here.</p>
+<p>You are a platform admin. Manage <a href="/admin/users">users</a>, <a href="/admin/groups">groups</a> and <a href="/admin/databases">database connections</a>.</p>
 {{end}}
+<p><a href="/databases">Open a database</a> you have access to.</p>
 {{end}}

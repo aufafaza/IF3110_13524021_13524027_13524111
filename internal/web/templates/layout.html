@@ -12,9 +12,11 @@
 <header class="topbar">
 	<a class="brand" href="/">Database Platform</a>
 	<nav>
+		<a href="/databases">Databases</a>
 		{{if .User.IsPlatformAdmin}}
 		<a href="/admin/users">Users</a>
 		<a href="/admin/groups">Groups</a>
+		<a href="/admin/databases">Manage databases</a>
 		{{end}}
 	</nav>
 	<form class="logout" method="post" action="/logout">

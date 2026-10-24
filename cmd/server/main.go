@@ -10,6 +10,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/config"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
@@ -57,10 +58,21 @@ func main() {
 		Domain:   cfg.Session.Domain,
 	}
 
+	cipher, err := dbmanager.NewCipher(cfg.EncryptionKey)
+	if err != nil {
+		log.Fatalf("dbmanager: %v", err)
+	}
+
+	registry := dbmanager.NewRegistry(pool, cipher)
+	defer registry.Close()
+
 	tmpl, err := templates.New()
 	if err != nil {
 		log.Fatalf("templates: %v", err)
 	}
+
+	checker := access.NewPostgresChecker(pool)
+
 	adminService := admin.NewService(admin.NewPostgresStore(pool), auth.NewArgon2idHasher(), sessions)
 
 	handler := web.New(web.Deps{
@@ -68,7 +80,9 @@ func main() {
 		Home:         handlers.NewHomeHandler(tmpl),
 		Admin:        handlers.NewAdminHandler(adminService, tmpl),
 		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
-		Guard:        access.NewGuard(access.NewPostgresChecker(pool), "/login"),
+		Guard:        access.NewGuard(checker, "/login"),
+		Databases:    handlers.NewDatabaseHandler(registry, dbmanager.NewViewer(registry), checker, nil, tmpl),
+		Admin:        handlers.NewAdminHandler(adminService, tmpl),
 	})
 
 	srv := &http.Server{

@@ -1,0 +1,52 @@
+{{define "content"}}
+<h1>Edit database</h1>
+<p><a href="/admin/databases">&larr; All databases</a></p>
+{{template "database_form" .Data}}
+{{end}}
+
+{{define "database_form"}}
+<div id="database-form">
+	{{if .Message}}<p class="notice">{{.Message}}</p>{{end}}
+	{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+	<section>
+		<h2>{{.Database.Name}}</h2>
+		<form class="stack" hx-post="/admin/databases/{{.Database.ID}}" hx-target="#database-form" hx-swap="outerHTML">
+			<label>Name
+				<input name="name" required maxlength="64" autocomplete="off" value="{{.Form.Name}}">
+			</label>
+			<label>Host
+				<input name="host" required autocomplete="off" value="{{.Form.Host}}">
+			</label>
+			<label>Port
+				<input type="number" name="port" min="1" max="65535" value="{{.Form.Port}}">
+			</label>
+			<label>Database name
+				<input name="db_name" required autocomplete="off" value="{{.Form.DBName}}">
+			</label>
+			<label>User
+				<input name="db_user" required autocomplete="off" value="{{.Form.DBUser}}">
+			</label>
+			<label>New password (leave empty to keep the current one)
+				<input type="password" name="password" autocomplete="new-password">
+			</label>
+			<label>SSL mode
+				<select name="sslmode">
+					{{range $m := list "disable" "allow" "prefer" "require" "verify-ca" "verify-full"}}
+					<option value="{{$m}}"{{if eq $m $.Form.SSLMode}} selected{{end}}>{{$m}}</option>
+					{{end}}
+				</select>
+			</label>
+			<div class="actions">
+				<button type="submit">Save changes</button>
+				<button type="button" hx-post="/admin/databases/{{.Database.ID}}/test" hx-target="#test-result" hx-swap="innerHTML">Test saved connection</button>
+			</div>
+			<div id="test-result" aria-live="polite"></div>
+		</form>
+	</section>
+</div>
+{{end}}
+
+{{define "conn_result"}}
+{{if .OK}}<p class="notice">{{.Message}}</p>{{else}}<p class="error">{{.Message}}</p>{{end}}
+{{end}}

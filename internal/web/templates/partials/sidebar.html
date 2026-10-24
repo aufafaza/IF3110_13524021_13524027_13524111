@@ -1,0 +1,14 @@
+{{define "sidebar"}}
+<nav class="tree" aria-label="Tables">
+	{{range .Schemas}}
+	<h3>{{.Name}}</h3>
+	<ul>
+		{{range .Tables}}
+		<li><a href="{{.URL}}"{{if .Active}} class="active" aria-current="page"{{end}}>{{.Name}}</a></li>
+		{{end}}
+	</ul>
+	{{else}}
+	<p class="muted">No tables.</p>
+	{{end}}
+</nav>
+{{end}}
