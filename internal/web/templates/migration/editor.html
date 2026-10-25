@@ -6,7 +6,7 @@
     <title>{{if .IsEdit}}Edit Draft Migration #{{.Migration.ID}}{{else}}New Migration{{end}} — Database #{{.DatabaseID}}</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #1f2937; background: #f9fafb; }
-        .container { max-width: 960px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .container { max-width: 1050px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 1rem; margin-bottom: 1.5rem; }
         .form-group { margin-bottom: 1.25rem; }
         label { display: block; font-weight: 600; margin-bottom: 0.4rem; }
@@ -15,11 +15,16 @@
         .btn { display: inline-block; padding: 0.55rem 1.1rem; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 0.9rem; cursor: pointer; border: 1px solid transparent; margin-right: 0.5rem; }
         .btn-primary { background: #2563eb; color: #ffffff; }
         .btn-secondary { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+        .btn-accent { background: #0f766e; color: #ffffff; }
         .btn-danger { background: #dc2626; color: #ffffff; }
         .alert-error { background: #fee2e2; border: 1px solid #f87171; color: #991b1b; padding: 0.85rem 1rem; border-radius: 6px; margin-bottom: 1.25rem; }
         .preview-box { background: #f8fafc; border: 1px solid #cbd5e1; padding: 1rem 1.25rem; border-radius: 6px; margin-top: 1.5rem; }
-        pre { background: #1e293b; color: #e2e8f0; padding: 0.75rem; border-radius: 6px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        pre { background: #1e293b; color: #e2e8f0; padding: 0.75rem; border-radius: 6px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0.4rem 0; }
         .notice { font-size: 0.85rem; color: #4b5563; margin-top: 0.35rem; }
+        table.plan-table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; background: #ffffff; }
+        table.plan-table th, table.plan-table td { border: 1px solid #e2e8f0; padding: 0.55rem 0.65rem; text-align: left; font-size: 0.85rem; vertical-align: top; }
+        table.plan-table th { background: #f1f5f9; font-weight: 600; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     </style>
 </head>
 <body>
@@ -53,6 +58,8 @@
 
         <div>
             <button type="submit" name="action" value="preview" class="btn btn-secondary">Preview SQL</button>
+            <button type="submit" name="action" value="explain" class="btn btn-accent">Analyze Plan (EXPLAIN)</button>
+            <button type="submit" name="action" value="explain_analyze" class="btn btn-accent">Analyze Plan (EXPLAIN ANALYZE)</button>
             <button type="submit" name="action" value="save" class="btn btn-primary">Save Draft</button>
         </div>
     </form>
@@ -66,6 +73,47 @@
             <li><pre><code>{{.}}</code></pre></li>
             {{end}}
         </ol>
+
+        {{if .Preview.PlanReport}}
+        <h3>Query Execution Plan Analysis ({{if .Preview.PlanReport.Analyze}}EXPLAIN ANALYZE{{else}}EXPLAIN{{end}})</h3>
+        <p class="notice">Executed inside a temporary sandbox transaction that was automatically rolled back.</p>
+        <table class="plan-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Mode</th>
+                    <th>Scan Types</th>
+                    <th>Indexes Used</th>
+                    <th>Join Strategy</th>
+                    <th>Est. Cost</th>
+                    <th>Est. Rows</th>
+                    <th>Actual Time</th>
+                    <th>Actual Rows</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Preview.PlanReport.Statements}}
+                <tr>
+                    <td class="mono">{{.Index}}</td>
+                    <td class="mono">{{.Mode}}</td>
+                    <td>{{joinStrings .ScanTypes}}</td>
+                    <td class="mono">{{joinStrings .IndexesUsed}}</td>
+                    <td>{{joinStrings .JoinStrategies}}</td>
+                    <td class="mono">{{if .IsExplainable}}{{printf "%.2f..%.2f" .StartupCost .TotalCost}}{{else}}-{{end}}</td>
+                    <td class="mono">{{if .IsExplainable}}{{.PlanRows}}{{else}}-{{end}}</td>
+                    <td class="mono">{{formatFloatPtr .ActualTotalTimeMs}}</td>
+                    <td class="mono">{{formatInt64Ptr .ActualRows}}</td>
+                </tr>
+                <tr>
+                    <td colspan="9">
+                        <strong>Statement #{{.Index}}:</strong> <code>{{.SQL}}</code>
+                        <pre><code>{{.RawPlan}}</code></pre>
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{end}}
 
         {{if .IsEdit}}
         <form method="POST" action="/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}/execute" style="margin-top: 1rem;">

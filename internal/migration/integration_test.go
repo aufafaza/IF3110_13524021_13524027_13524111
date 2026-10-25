@@ -287,3 +287,51 @@ func TestIntegrationParallelExecutionMaintainsLinearHistory(t *testing.T) {
 			successCount.Load(), alreadyAppliedCount.Load(), workers-1)
 	}
 }
+
+func TestIntegrationExplainAndExplainAnalyzeRollback(t *testing.T) {
+	ctx := context.Background()
+	env := setupIntegrationEnv(t)
+
+	sql := `
+		CREATE TABLE departments (id INT PRIMARY KEY, name TEXT NOT NULL);
+		CREATE TABLE employees (id INT PRIMARY KEY, dept_id INT NOT NULL REFERENCES departments(id), salary INT NOT NULL);
+		CREATE INDEX idx_employees_dept ON employees (dept_id);
+		INSERT INTO departments (id, name) VALUES (1, 'Engineering'), (2, 'Sales');
+		INSERT INTO employees (id, dept_id, salary) VALUES (10, 1, 120000), (11, 1, 130000), (12, 2, 95000);
+		SELECT e.id, d.name FROM employees e INNER JOIN departments d ON d.id = e.dept_id WHERE e.dept_id = 1;
+	`
+
+	preview, err := env.service.AnalyzeSQL(ctx, env.editUser, env.dbID, "Department employee query plan", sql, true)
+	if err != nil {
+		t.Fatalf("AnalyzeSQL (EXPLAIN ANALYZE): %v", err)
+	}
+	if preview.PlanReport == nil || !preview.PlanReport.Analyze {
+		t.Fatalf("expected non-nil PlanReport with Analyze=true")
+	}
+	if len(preview.PlanReport.Statements) != 6 {
+		t.Fatalf("statements in plan report = %d, want 6", len(preview.PlanReport.Statements))
+	}
+
+	selectPlan := preview.PlanReport.Statements[5]
+	if !selectPlan.IsExplainable || selectPlan.Mode != "EXPLAIN ANALYZE" {
+		t.Fatalf("selectPlan = %+v, want IsExplainable=true Mode=EXPLAIN ANALYZE", selectPlan)
+	}
+	if len(selectPlan.ScanTypes) == 0 {
+		t.Errorf("expected scan types to be extracted, got none")
+	}
+	if len(selectPlan.JoinStrategies) == 0 {
+		t.Errorf("expected join strategy to be extracted, got none")
+	}
+	if selectPlan.ActualTotalTimeMs == nil || selectPlan.ActualRows == nil || *selectPlan.ActualRows != 2 {
+		t.Errorf("expected actual time and actual rows=2, got time=%v rows=%v", selectPlan.ActualTotalTimeMs, selectPlan.ActualRows)
+	}
+
+	var deptExists bool
+	if err := env.targetPool.QueryRow(ctx, "SELECT to_regclass('departments') IS NOT NULL").Scan(&deptExists); err != nil {
+		t.Fatalf("check departments after explain analyze: %v", err)
+	}
+	if deptExists {
+		t.Fatal("departments table exists after EXPLAIN ANALYZE; sandbox transaction was not rolled back!")
+	}
+}
+
