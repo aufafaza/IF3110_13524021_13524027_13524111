@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
@@ -99,6 +100,24 @@ func mustParseTemplates(fsys fs.FS) *template.Template {
 			}
 			return t.UTC().Format("2006-01-02 15:04:05 UTC")
 		},
+		"formatFloatPtr": func(p *float64) string {
+			if p == nil {
+				return "-"
+			}
+			return fmt.Sprintf("%.3f ms", *p)
+		},
+		"formatInt64Ptr": func(p *int64) string {
+			if p == nil {
+				return "-"
+			}
+			return strconv.FormatInt(*p, 10)
+		},
+		"joinStrings": func(items []string) string {
+			if len(items) == 0 {
+				return "-"
+			}
+			return strings.Join(items, ", ")
+		},
 	}
 	return template.Must(template.New("").Funcs(funcs).ParseFS(fsys, "*.html"))
 }
@@ -117,6 +136,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /databases/{dbID}/migrations/{migrationID}", viewGuard(http.HandlerFunc(h.handleDetail)))
 	mux.Handle("GET /databases/{dbID}/migrations/{migrationID}/edit", editGuard(http.HandlerFunc(h.handleEditEditor)))
 	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}", editGuard(http.HandlerFunc(h.handleUpdateOrPreview)))
+	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", editGuard(http.HandlerFunc(h.handleExplain)))
 	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", editGuard(http.HandlerFunc(h.handleExecute)))
 }
 
@@ -143,6 +163,7 @@ type detailViewData struct {
 	CanEdit    bool
 	Migration  Migration
 	Statements []string
+	PlanReport *ExecutionPlanReport
 	Error      string
 	CSRFToken  string
 }
@@ -250,8 +271,13 @@ func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if action == "preview" {
-		preview, err := h.service.PreviewSQL(r.Context(), user.ID, dbID, title, sqlStr)
+	if action == "preview" || action == "explain" || action == "explain_analyze" {
+		var preview PreviewResult
+		if action == "explain" || action == "explain_analyze" {
+			preview, err = h.service.AnalyzeSQL(r.Context(), user.ID, dbID, title, sqlStr, action == "explain_analyze")
+		} else {
+			preview, err = h.service.PreviewSQL(r.Context(), user.ID, dbID, title, sqlStr)
+		}
 		if err != nil {
 			if wantsJSON(r) {
 				h.writeError(w, r, err)
@@ -318,8 +344,13 @@ func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if action == "preview" {
-		preview, err := h.service.PreviewSQL(r.Context(), user.ID, dbID, title, sqlStr)
+	if action == "preview" || action == "explain" || action == "explain_analyze" {
+		var preview PreviewResult
+		if action == "explain" || action == "explain_analyze" {
+			preview, err = h.service.AnalyzeSQL(r.Context(), user.ID, dbID, title, sqlStr, action == "explain_analyze")
+		} else {
+			preview, err = h.service.PreviewSQL(r.Context(), user.ID, dbID, title, sqlStr)
+		}
 		if err != nil {
 			if wantsJSON(r) {
 				h.writeError(w, r, err)
@@ -409,6 +440,52 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		CanEdit:    level >= LevelEdit,
 		Migration:  m,
 		Statements: SplitStatements(m.SQL),
+		CSRFToken:  h.extractCSRF(r),
+	})
+}
+
+func (h *Handler) handleExplain(w http.ResponseWriter, r *http.Request) {
+	user, dbID, migID, ok := h.requireUserDBAndMigration(w, r)
+	if !ok {
+		return
+	}
+
+	analyze := parseAnalyzeInput(r)
+
+	m, err := h.service.GetDetail(r.Context(), user.ID, dbID, migID)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	report, err := h.service.ExplainMigration(r.Context(), user.ID, dbID, migID, analyze)
+	if err != nil {
+		if wantsJSON(r) {
+			h.writeError(w, r, err)
+			return
+		}
+		h.renderTemplate(w, statusForError(err), "detail.html", detailViewData{
+			DatabaseID: dbID,
+			CanEdit:    true,
+			Migration:  m,
+			Statements: SplitStatements(m.SQL),
+			Error:      err.Error(),
+			CSRFToken:  h.extractCSRF(r),
+		})
+		return
+	}
+
+	if wantsJSON(r) {
+		writeJSON(w, http.StatusOK, report)
+		return
+	}
+
+	h.renderTemplate(w, http.StatusOK, "detail.html", detailViewData{
+		DatabaseID: dbID,
+		CanEdit:    true,
+		Migration:  m,
+		Statements: SplitStatements(m.SQL),
+		PlanReport: &report,
 		CSRFToken:  h.extractCSRF(r),
 	})
 }
@@ -512,6 +589,21 @@ func parseConfirmInput(r *http.Request) (bool, error) {
 	}
 	v := strings.ToLower(strings.TrimSpace(r.FormValue("confirm")))
 	return v == "true" || v == "1" || v == "on" || v == "yes", nil
+}
+
+func parseAnalyzeInput(r *http.Request) bool {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Analyze bool `json:"analyze"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			return body.Analyze
+		}
+		return false
+	}
+	_ = r.ParseForm()
+	v := strings.ToLower(strings.TrimSpace(r.FormValue("analyze")))
+	return v == "true" || v == "1" || v == "on" || v == "yes"
 }
 
 func wantsJSON(r *http.Request) bool {

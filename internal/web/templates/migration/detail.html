@@ -6,7 +6,7 @@
     <title>Migration #{{.Migration.ID}} — Database #{{.DatabaseID}}</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #1f2937; background: #f9fafb; }
-        .container { max-width: 960px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .container { max-width: 1050px; margin: 0 auto; background: #ffffff; padding: 1.5rem 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 1rem; margin-bottom: 1.5rem; }
         .badge { display: inline-block; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
         .badge-applied { background: #d1fae5; color: #065f46; }
@@ -17,9 +17,14 @@
         pre { background: #111827; color: #f9fafb; padding: 1rem; border-radius: 6px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.45; }
         .alert-error { background: #fee2e2; border: 1px solid #f87171; color: #991b1b; padding: 1rem; border-radius: 6px; margin-bottom: 1.5rem; }
         .execute-panel { background: #fffbeb; border: 1px solid #fcd34d; padding: 1.25rem; border-radius: 6px; margin-top: 1.5rem; }
+        .plan-panel { background: #f0fdfa; border: 1px solid #5eead4; padding: 1.25rem; border-radius: 6px; margin-top: 1.5rem; }
+        table.plan-table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; background: #ffffff; }
+        table.plan-table th, table.plan-table td { border: 1px solid #cbd5e1; padding: 0.55rem 0.65rem; text-align: left; font-size: 0.85rem; vertical-align: top; }
+        table.plan-table th { background: #f1f5f9; font-weight: 600; }
         .btn { display: inline-block; padding: 0.55rem 1.1rem; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 0.9rem; cursor: pointer; border: 1px solid transparent; margin-right: 0.5rem; }
         .btn-primary { background: #2563eb; color: #ffffff; }
         .btn-secondary { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+        .btn-accent { background: #0f766e; color: #ffffff; }
         .btn-danger { background: #dc2626; color: #ffffff; }
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     </style>
@@ -85,6 +90,64 @@
     <pre><code>{{.Migration.SQL}}</code></pre>
 
     {{if and .CanEdit (eq .Migration.Status "draft")}}
+    <div class="plan-panel">
+        <h3>Query Execution Plan Analysis (EXPLAIN / EXPLAIN ANALYZE)</h3>
+        <p>Inspect the PostgreSQL execution plan (scan type, index usage, join strategy, estimated cost, actual execution time, and rows processed) inside a rolled-back sandbox transaction before executing.</p>
+        <form method="POST" action="/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}/explain" style="display: inline;">
+            {{if .CSRFToken}}
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            {{end}}
+            <input type="hidden" name="analyze" value="false">
+            <button type="submit" class="btn btn-accent">Run EXPLAIN</button>
+        </form>
+        <form method="POST" action="/databases/{{.DatabaseID}}/migrations/{{.Migration.ID}}/explain" style="display: inline;">
+            {{if .CSRFToken}}
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            {{end}}
+            <input type="hidden" name="analyze" value="true">
+            <button type="submit" class="btn btn-accent">Run EXPLAIN ANALYZE</button>
+        </form>
+
+        {{if .PlanReport}}
+        <table class="plan-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Mode</th>
+                    <th>Scan Types</th>
+                    <th>Indexes Used</th>
+                    <th>Join Strategy</th>
+                    <th>Est. Cost</th>
+                    <th>Est. Rows</th>
+                    <th>Actual Time</th>
+                    <th>Actual Rows</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .PlanReport.Statements}}
+                <tr>
+                    <td class="mono">{{.Index}}</td>
+                    <td class="mono">{{.Mode}}</td>
+                    <td>{{joinStrings .ScanTypes}}</td>
+                    <td class="mono">{{joinStrings .IndexesUsed}}</td>
+                    <td>{{joinStrings .JoinStrategies}}</td>
+                    <td class="mono">{{if .IsExplainable}}{{printf "%.2f..%.2f" .StartupCost .TotalCost}}{{else}}-{{end}}</td>
+                    <td class="mono">{{if .IsExplainable}}{{.PlanRows}}{{else}}-{{end}}</td>
+                    <td class="mono">{{formatFloatPtr .ActualTotalTimeMs}}</td>
+                    <td class="mono">{{formatInt64Ptr .ActualRows}}</td>
+                </tr>
+                <tr>
+                    <td colspan="9">
+                        <strong>Statement #{{.Index}}:</strong> <code>{{.SQL}}</code>
+                        <pre><code>{{.RawPlan}}</code></pre>
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{end}}
+    </div>
+
     <div class="execute-panel">
         <h3>Preview &amp; Execute Migration</h3>
         <p>Executing this migration will acquire the database advisory lock, assign the next sequential version, and run all {{len .Statements}} statement(s) inside a transaction (<code>BEGIN ... COMMIT</code>). If any statement fails, all changes on the target database will be rolled back and the failure will be recorded in history.</p>
