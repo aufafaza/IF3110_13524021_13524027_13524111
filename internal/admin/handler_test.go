@@ -1,4 +1,4 @@
-package handlers_test
+package admin_test
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 )
 
@@ -33,7 +32,7 @@ type adminCalls struct {
 }
 
 type fakeAdminSvc struct {
-	handlers.AdminService
+	admin.AdminService
 
 	calls adminCalls
 	err   error
@@ -137,7 +136,7 @@ func key(parts ...any) string {
 }
 
 type adminRig struct {
-	h   *handlers.AdminHandler
+	h   *admin.Handler
 	svc *fakeAdminSvc
 }
 
@@ -148,7 +147,7 @@ func newAdminRig(t *testing.T) adminRig {
 		t.Fatal(err)
 	}
 	svc := &fakeAdminSvc{}
-	return adminRig{h: handlers.NewAdminHandler(svc, tmpl), svc: svc}
+	return adminRig{h: admin.NewHandler(svc, tmpl), svc: svc}
 }
 
 func adminRequest(method, target string, form url.Values, pathValues map[string]string) *http.Request {

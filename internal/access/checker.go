@@ -24,9 +24,13 @@ type User struct {
 	IsPlatformAdmin bool
 }
 
-type Checker interface {
-	IsPlatformAdmin(ctx context.Context, userID int64) (bool, error)
+type DatabaseChecker interface {
 	EffectiveLevel(ctx context.Context, userID, databaseID int64) (Level, error)
+}
+
+type Checker interface {
+	DatabaseChecker
+	IsPlatformAdmin(ctx context.Context, userID int64) (bool, error)
 }
 
 type ctxKey struct{}

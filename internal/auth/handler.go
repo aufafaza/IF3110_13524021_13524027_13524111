@@ -1,4 +1,4 @@
-package handlers
+package auth
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
@@ -23,14 +22,14 @@ type SessionManager interface {
 	Logout(ctx context.Context, rawToken string) error
 }
 
-type AuthHandler struct {
+type Handler struct {
 	auth     Authenticator
 	sessions SessionManager
 	cookie   session.CookieConfig
 }
 
-func NewAuthHandler(auth Authenticator, sessions SessionManager, cookie session.CookieConfig) *AuthHandler {
-	return &AuthHandler{auth: auth, sessions: sessions, cookie: cookie}
+func NewHandler(auth Authenticator, sessions SessionManager, cookie session.CookieConfig) *Handler {
+	return &Handler{auth: auth, sessions: sessions, cookie: cookie}
 }
 
 var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
@@ -47,9 +46,9 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 </body>
 </html>`))
 
-func (h *AuthHandler) renderLogin(w http.ResponseWriter, status int, errMsg string) {
+func (h *Handler) renderLogin(w http.ResponseWriter, status int, errMsg string) {
 	token, err := h.issueLoginToken(w)
-	if err != nil { 
+	if err != nil {
 		log.Printf("login: csrf token: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -57,25 +56,25 @@ func (h *AuthHandler) renderLogin(w http.ResponseWriter, status int, errMsg stri
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	w.WriteHeader(status)
-	data := struct { Error, CSRFToken string } {errMsg, token } 
-	if err := loginTmpl.Execute(w, data); err != nil { 
+	data := struct{ Error, CSRFToken string }{errMsg, token}
+	if err := loginTmpl.Execute(w, data); err != nil {
 		log.Printf("login: render: %v", err)
 	}
 }
 
-func (h *AuthHandler) clearLoginToken(w http.ResponseWriter){ 
+func (h *Handler) clearLoginToken(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name: csrf.PreSessionCookie, 
-		Value: "", 
-		Path: "/login", 
-		HttpOnly: true, 
-		Secure: h.cookie.Secure, 
-		SameSite: h.cookie.SameSite, 
-		MaxAge: -1,
+		Name:     csrf.PreSessionCookie,
+		Value:    "",
+		Path:     "/login",
+		HttpOnly: true,
+		Secure:   h.cookie.Secure,
+		SameSite: h.cookie.SameSite,
+		MaxAge:   -1,
 	})
 }
 
-func (h *AuthHandler) PostLogin(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if err := r.ParseForm(); err != nil {
@@ -86,7 +85,7 @@ func (h *AuthHandler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.PostFormValue("password")
 
 	user, err := h.auth.Login(ctx, username, password)
-	if errors.Is(err, auth.ErrInvalidCredentials) {
+	if errors.Is(err, ErrInvalidCredentials) {
 		h.renderLogin(w, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
@@ -114,7 +113,7 @@ func (h *AuthHandler) PostLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (h *AuthHandler) PostLogout(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) PostLogout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if raw, ok := session.ReadCookie(r, h.cookie); ok {
 		err := h.sessions.Logout(ctx, raw)
@@ -127,7 +126,7 @@ func (h *AuthHandler) PostLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (h *AuthHandler) GetLogin(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if _, ok := access.UserFromContext(ctx); ok {
@@ -137,19 +136,19 @@ func (h *AuthHandler) GetLogin(w http.ResponseWriter, r *http.Request) {
 	h.renderLogin(w, http.StatusOK, "")
 }
 
-func (h *AuthHandler) issueLoginToken(w http.ResponseWriter) (string, error) {
+func (h *Handler) issueLoginToken(w http.ResponseWriter) (string, error) {
 	token, err := csrf.NewPreSessionToken()
 	if err != nil {
 		return "", err
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:  csrf.PreSessionCookie,
-		Value: token,
-		Path: "/login", 
+		Name:     csrf.PreSessionCookie,
+		Value:    token,
+		Path:     "/login",
 		HttpOnly: true,
-		Secure: h.cookie.Secure, 
-		SameSite: h.cookie.SameSite,	
+		Secure:   h.cookie.Secure,
+		SameSite: h.cookie.SameSite,
 	})
-	return token, nil 
+	return token, nil
 }

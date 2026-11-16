@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 )
 
 const migrationLockNamespace int32 = 727002
@@ -43,11 +43,11 @@ func (g *localGate) lock(ctx context.Context, databaseID int64) (func(), error) 
 }
 
 type TargetPostgresLocker struct {
-	provider dbmanager.Provider
+	provider database.Provider
 	gate     localGate
 }
 
-func NewTargetPostgresLocker(provider dbmanager.Provider) *TargetPostgresLocker {
+func NewTargetPostgresLocker(provider database.Provider) *TargetPostgresLocker {
 	return &TargetPostgresLocker{provider: provider}
 }
 

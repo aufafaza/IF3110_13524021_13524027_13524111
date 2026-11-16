@@ -5,21 +5,24 @@ import (
 	"net/http"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/static"
 )
 
 type Deps struct {
-	Auth         *handlers.AuthHandler
-	Home         *handlers.HomeHandler
-	Admin        *handlers.AdminHandler
+	Auth         *auth.Handler
+	Home         *home.Handler
+	Admin        *admin.Handler
 	Authenticate *middleware.Authenticator
 	Guard        *access.Guard
-	Databases    *handlers.DatabaseHandler // optional; nil leaves the database routes out
-	Migrations   *migration.Handler        // optional; nil leaves the migration routes out
+	Databases    *database.Handler  // optional; nil leaves the database routes out
+	Migrations   *migration.Handler // optional; nil leaves the migration routes out
 }
 
 func New(d Deps) http.Handler {
@@ -28,30 +31,12 @@ func New(d Deps) http.Handler {
 	mux.HandleFunc("GET /healthz", health)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static.FS)))
 
-	mux.HandleFunc("GET /login", d.Auth.GetLogin)
-	mux.HandleFunc("POST /login", d.Auth.PostLogin)
-	mux.HandleFunc("POST /logout", d.Auth.PostLogout)
-
-	mux.Handle("GET /{$}", d.Guard.RequireLogin(http.HandlerFunc(d.Home.Index)))
-
-	adminRoute := func(pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, d.Guard.RequireAdmin(h))
+	d.Auth.RegisterRoutes(mux)
+	d.Home.RegisterRoutes(mux, d.Guard)
+	d.Admin.RegisterRoutes(mux, d.Guard)
+	if d.Databases != nil {
+		d.Databases.RegisterRoutes(mux, d.Guard)
 	}
-	adminRoute("GET /admin/users", d.Admin.UsersPage)
-	adminRoute("POST /admin/users", d.Admin.CreateUser)
-	adminRoute("POST /admin/users/{id}/active", d.Admin.SetUserActive)
-	adminRoute("POST /admin/users/{id}/password", d.Admin.ResetPassword)
-
-	adminRoute("GET /admin/groups", d.Admin.GroupsPage)
-	adminRoute("POST /admin/groups", d.Admin.CreateGroup)
-	adminRoute("GET /admin/groups/{id}", d.Admin.GroupPage)
-	adminRoute("POST /admin/groups/{id}/delete", d.Admin.DeleteGroup)
-	adminRoute("POST /admin/groups/{id}/members", d.Admin.AddMember)
-	adminRoute("POST /admin/groups/{id}/members/{userID}/remove", d.Admin.RemoveMember)
-	adminRoute("POST /admin/groups/{id}/grants", d.Admin.SetGrant)
-	adminRoute("POST /admin/groups/{id}/grants/{dbID}/remove", d.Admin.RemoveGrant)
-
-	registerDatabaseRoutes(mux, d)
 	if d.Migrations != nil {
 		d.Migrations.RegisterRoutes(mux)
 	}

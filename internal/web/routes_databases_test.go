@@ -7,8 +7,9 @@ import (
 	"testing"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 )
@@ -29,10 +30,10 @@ func databaseRouter(t *testing.T, valid bool) http.Handler {
 	sessions := &fakeSessions{valid: valid}
 	cookie := session.CookieConfig{Name: testCookie, SameSite: http.SameSiteLaxMode}
 	return New(Deps{
-		Auth:         handlers.NewAuthHandler(fakeLogin{}, sessions, cookie),
+		Auth:         auth.NewHandler(fakeLogin{}, sessions, cookie),
 		Authenticate: middleware.NewAuthenticator(sessions, fakeUsers{}, cookie),
 		Guard:        access.NewGuard(noLevelChecker{}, "/login"),
-		Databases:    handlers.NewDatabaseHandler(nil, nil, noLevelChecker{}, nil, tmpl),
+		Databases:    database.NewHandler(nil, nil, noLevelChecker{}, nil, tmpl),
 	})
 }
 

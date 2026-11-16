@@ -1,158 +1,215 @@
 package migration_test
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
 
-func setupTestHandler() (*migration.Handler, *stubExecutor) {
+func setupTestHandler() (http.Handler, *stubExecutor) {
 	repo := newMemoryRepository()
-	locker := &noopLocker{}
 	exec := &stubExecutor{}
-	checker := &stubChecker{
-		grants: map[[2]int64]migration.AccessLevel{
-			{1, 10}: migration.LevelNone,
-			{2, 10}: migration.LevelView,
-			{3, 10}: migration.LevelEdit,
-		},
-	}
-	runner := migration.NewRunner(repo, locker, exec)
+	checker := &stubChecker{grants: map[[2]int64]access.Level{
+		{1, 10}: access.LevelNone, {2, 10}: access.LevelView, {3, 10}: access.LevelEdit,
+	}}
+	runner := migration.NewRunner(repo, &noopLocker{}, &planExecutor{exec})
 	svc := migration.NewService(repo, runner, checker)
-	return migration.NewHandler(svc), exec
+	mux := http.NewServeMux()
+	migration.NewHandler(svc).RegisterRoutes(mux)
+	return mux, exec
 }
 
-func requestAsUser(method, target string, user migration.User, form url.Values) *http.Request {
-	var body *strings.Reader
-	if form != nil {
-		body = strings.NewReader(form.Encode())
-	} else {
-		body = strings.NewReader("")
-	}
-	req := httptest.NewRequest(method, target, body)
-	if form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+func requestAsUser(method, target string, user access.User, body string) *http.Request {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if user.ID != 0 {
-		req = req.WithContext(migration.WithUser(req.Context(), user))
+		req = req.WithContext(access.ContextWithUser(req.Context(), user))
 	}
 	return req
 }
 
-func TestHandlerAccessControlAndUI(t *testing.T) {
-	h, exec := setupTestHandler()
-
-	noAccessUser := migration.User{ID: 1, Username: "outsider"}
-	viewUser := migration.User{ID: 2, Username: "viewer"}
-	editUser := migration.User{ID: 3, Username: "editor"}
-
+func callAPI(t *testing.T, h http.Handler, method, path string, userID int64, body string, status int) *httptest.ResponseRecorder {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodGet, "/databases/10/migrations", migration.User{}, nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated GET history: status = %d, want 401", rec.Code)
+	h.ServeHTTP(rec, requestAsUser(method, path, access.User{ID: userID}, body))
+	if rec.Code != status {
+		t.Fatalf("%s %s: got %d %s, want %d", method, path, rec.Code, rec.Body.String(), status)
 	}
+	if rec.Header().Get("Content-Type") != "application/json" || !json.Valid(rec.Body.Bytes()) {
+		t.Fatalf("expected JSON response, got %s: %s", rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	return rec
+}
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodGet, "/databases/10/migrations", noAccessUser, nil))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("LevelNone GET history: status = %d, want 403", rec.Code)
+func TestMigrationAPIWorkflow(t *testing.T) {
+	h, exec := setupTestHandler()
+	base := "/databases/10/migrations"
+	view := callAPI(t, h, "GET", base, 2, "", 200)
+	var history struct {
+		CanEdit    bool                  `json:"can_edit"`
+		Migrations []migration.Migration `json:"migrations"`
 	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodGet, "/databases/10/migrations", viewUser, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("LevelView GET history: status = %d, want 200", rec.Code)
+	if err := json.Unmarshal(view.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(rec.Body.String(), "+ New Migration") {
-		t.Errorf("LevelView history page must not render '+ New Migration' button")
+	if history.CanEdit || history.Migrations == nil || len(history.Migrations) != 0 {
+		t.Fatalf("unexpected history: %+v", history)
 	}
-	if !strings.Contains(rec.Body.String(), "View Only") {
-		t.Errorf("LevelView history page should indicate View Only access")
+	preview := callAPI(t, h, "POST", base, 3, `{"title":"Products","sql":"SELECT 1; SELECT 2;","action":"preview"}`, 200)
+	var result migration.PreviewResult
+	if err := json.Unmarshal(preview.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
 	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodGet, "/databases/10/migrations/new", viewUser, nil))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("LevelView GET /new: status = %d, want 403", rec.Code)
+	if result.StatementCount != 2 || exec.calls != 0 {
+		t.Fatalf("preview: %+v, executions %d", result, exec.calls)
 	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodPost, "/databases/10/migrations", viewUser, url.Values{
-		"title":  {"Unauthorized migration"},
-		"sql":    {"CREATE TABLE hack (id int);"},
-		"action": {"save"},
-	}))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("LevelView POST /migrations: status = %d, want 403", rec.Code)
+	created := callAPI(t, h, "POST", base, 3, `{"title":"Products","sql":"SELECT 1;"}`, 201)
+	var draft migration.Migration
+	if err := json.Unmarshal(created.Body.Bytes(), &draft); err != nil {
+		t.Fatal(err)
 	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodPost, "/databases/10/migrations", editUser, url.Values{
-		"title":  {"Create products"},
-		"sql":    {"CREATE TABLE products (id int); INSERT INTO products VALUES (1);"},
-		"action": {"preview"},
-	}))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("LevelEdit preview: status = %d, want 200", rec.Code)
+	path := created.Header().Get("Location")
+	if draft.ID != 1 || draft.Status != migration.StatusDraft || path != base+"/1" {
+		t.Fatalf("unexpected draft: %+v, location %s", draft, path)
 	}
-	if !strings.Contains(rec.Body.String(), "SQL Preview (2 statements)") {
-		t.Errorf("expected preview box with 2 statements, got body: %s", rec.Body.String())
+	callAPI(t, h, "GET", path, 2, "", 200)
+	callAPI(t, h, "POST", path, 3, `{"title":"Updated","sql":"SELECT 2;","action":"save"}`, 200)
+	callAPI(t, h, "POST", path+"/execute", 2, `{"confirm":true}`, 403)
+	callAPI(t, h, "POST", path+"/execute", 3, `{}`, 400)
+	applied := callAPI(t, h, "POST", path+"/execute", 3, `{"confirm":true}`, 200)
+	var done migration.Migration
+	if err := json.Unmarshal(applied.Body.Bytes(), &done); err != nil {
+		t.Fatal(err)
 	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodPost, "/databases/10/migrations", editUser, url.Values{
-		"title":  {"Create products"},
-		"sql":    {"CREATE TABLE products (id int);"},
-		"action": {"save"},
-	}))
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("LevelEdit save draft: status = %d, want 303", rec.Code)
+	if done.Status != migration.StatusApplied || done.Version == nil || *done.Version != 1 || exec.calls != 1 {
+		t.Fatalf("execution: %+v, calls %d", done, exec.calls)
 	}
-	detailLoc := rec.Header().Get("Location")
-	if detailLoc != "/databases/10/migrations/1" {
-		t.Fatalf("redirect Location = %q, want /databases/10/migrations/1", detailLoc)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodGet, detailLoc, viewUser, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("LevelView GET detail: status = %d, want 200", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "Execute Migration") {
-		t.Errorf("LevelView detail page must not render Execute Migration button")
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodPost, detailLoc+"/execute", viewUser, url.Values{"confirm": {"true"}}))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("LevelView POST /execute: status = %d, want 403", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodPost, detailLoc+"/execute", editUser, url.Values{}))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("LevelEdit POST /execute without confirm: status = %d, want 400", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodPost, detailLoc+"/execute", editUser, url.Values{"confirm": {"true"}}))
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("LevelEdit POST /execute with confirm: status = %d, want 303", rec.Code)
-	}
+	callAPI(t, h, "POST", path, 3, `{"title":"Updated","sql":"SELECT 3;"}`, 409)
+	callAPI(t, h, "POST", path+"/execute", 3, `{"confirm":true}`, 409)
 	if exec.calls != 1 {
-		t.Fatalf("exec.calls = %d, want 1", exec.calls)
+		t.Fatal("executed twice")
 	}
+}
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, requestAsUser(http.MethodGet, detailLoc, viewUser, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET detail after execute: status = %d, want 200", rec.Code)
+func TestMigrationAPIErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name, method, path, body string
+		user                     int64
+		status                   int
+	}{
+		{"anonymous", "GET", "", "", 0, 401},
+		{"no grant", "GET", "", "", 1, 403},
+		{"view cannot create", "POST", "", `{"title":"Denied","sql":"SELECT 1;"}`, 2, 403},
+		{"invalid database", "GET", "/databases/bad/migrations", "", 3, 400},
+		{"invalid migration", "GET", "/bad", "", 3, 400},
+		{"missing migration", "GET", "/99", "", 3, 404},
+		{"malformed JSON", "POST", "", `{`, 3, 400},
+		{"multiple JSON values", "POST", "", `{} {}`, 3, 400},
+		{"unknown field", "POST", "", `{"typo":true}`, 3, 400},
+		{"unknown action", "POST", "", `{"action":"oops"}`, 3, 400},
+		{"empty title", "POST", "", `{"title":"","sql":"SELECT 1;"}`, 3, 400},
+		{"form body", "POST", "", "title=hello", 3, 400},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, exec := setupTestHandler()
+			path := "/databases/10/migrations" + tt.path
+			if strings.HasPrefix(tt.path, "/databases/") {
+				path = tt.path
+			}
+			callAPI(t, h, tt.method, path, tt.user, tt.body, tt.status)
+			if exec.calls != 0 {
+				t.Fatal("error executed SQL")
+			}
+		})
 	}
-	if !strings.Contains(rec.Body.String(), "v1") || !strings.Contains(rec.Body.String(), "applied") {
-		t.Errorf("detail page should display v1 and applied status")
+	h, _ := setupTestHandler()
+	req := requestAsUser("POST", "/databases/10/migrations", access.User{ID: 3}, "title=hello")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 415 {
+		t.Fatalf("form request: %d", rec.Code)
+	}
+}
+
+func TestMigrationExecutionFailure(t *testing.T) {
+	h, exec := setupTestHandler()
+	exec.err = errors.New("execution failed")
+	created := callAPI(t, h, "POST", "/databases/10/migrations", 3, `{"title":"Failure","sql":"SELECT 1;"}`, 201)
+	path := created.Header().Get("Location")
+	rec := callAPI(t, h, "POST", path+"/execute", 3, `{"confirm":true}`, 422)
+	var failed migration.Migration
+	if err := json.Unmarshal(rec.Body.Bytes(), &failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != migration.StatusFailed || failed.ErrorMessage == nil {
+		t.Fatalf("missing failure record: %+v", failed)
+	}
+	callAPI(t, h, "GET", path, 2, "", 200)
+}
+
+func TestMigrationJSONStillRequiresCSRF(t *testing.T) {
+	h, _ := setupTestHandler()
+	protected := csrf.Protect(csrf.PreSessionCookie)(h)
+	for _, token := range []string{"", "wrong", "expected"} {
+		req := requestAsUser("POST", "/databases/10/migrations", access.User{ID: 3}, `{"title":"Safe","sql":"SELECT 1;"}`)
+		req = req.WithContext(csrf.ContextWithToken(req.Context(), "expected"))
+		req.Header.Set(csrf.Header, token)
+		rec := httptest.NewRecorder()
+		protected.ServeHTTP(rec, req)
+		want := 403
+		if token == "expected" {
+			want = 201
+		}
+		if rec.Code != want {
+			t.Fatalf("token %q: status %d, want %d", token, rec.Code, want)
+		}
+	}
+}
+
+type planExecutor struct{ *stubExecutor }
+
+func (e *planExecutor) AnalyzePlan(_ context.Context, _ int64, sql string, analyze bool) (migration.ExecutionPlanReport, error) {
+	return migration.ExecutionPlanReport{Analyze: analyze, Statements: []migration.StatementPlan{{SQL: sql, IsExplainable: true}}}, nil
+}
+
+func TestMigrationExplanationAPI(t *testing.T) {
+	h, exec := setupTestHandler()
+	base := "/databases/10/migrations"
+	created := callAPI(t, h, "POST", base, 3, `{"title":"Plan","sql":"SELECT 1;"}`, 201)
+	path := created.Header().Get("Location")
+	rec := callAPI(t, h, "POST", path+"/explain", 3, `{"analyze":true}`, 200)
+	var report migration.ExecutionPlanReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Analyze || len(report.Statements) != 1 || report.Statements[0].SQL != "SELECT 1;" {
+		t.Fatalf("unexpected plan: %+v", report)
+	}
+	callAPI(t, h, "POST", path+"/explain", 2, `{}`, 403)
+	callAPI(t, h, "POST", path+"/explain", 3, `{"analyze":"yes"}`, 400)
+	callAPI(t, h, "POST", path, 3, `{"title":"Plan","sql":"SELECT 2;","action":"explain_analyze"}`, 200)
+	detail := callAPI(t, h, "GET", path, 2, "", 200)
+	var draft migration.Migration
+	if err := json.Unmarshal(detail.Body.Bytes(), &draft); err != nil {
+		t.Fatal(err)
+	}
+	if draft.SQL != "SELECT 1;" || draft.Status != migration.StatusDraft || exec.calls != 0 {
+		t.Fatalf("explanation changed draft or executed migration: %+v", draft)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, requestAsUser("GET", path+"/edit", access.User{ID: 3}, ""))
+	if rec.Code != 404 {
+		t.Fatalf("removed editor route: status %d", rec.Code)
 	}
 }

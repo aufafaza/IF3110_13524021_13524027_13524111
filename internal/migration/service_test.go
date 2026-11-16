@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 )
 
@@ -158,10 +159,10 @@ func (e *stubExecutor) ExecInTx(_ context.Context, _ int64, _ string) error {
 }
 
 type stubChecker struct {
-	grants map[[2]int64]migration.AccessLevel
+	grants map[[2]int64]access.Level
 }
 
-func (c *stubChecker) EffectiveLevel(_ context.Context, userID, databaseID int64) (migration.AccessLevel, error) {
+func (c *stubChecker) EffectiveLevel(_ context.Context, userID, databaseID int64) (access.Level, error) {
 	return c.grants[[2]int64{userID, databaseID}], nil
 }
 
@@ -195,10 +196,10 @@ func TestServiceAuthorization(t *testing.T) {
 	locker := &noopLocker{}
 	exec := &stubExecutor{}
 	checker := &stubChecker{
-		grants: map[[2]int64]migration.AccessLevel{
-			{1, 100}: migration.LevelNone,
-			{2, 100}: migration.LevelView,
-			{3, 100}: migration.LevelEdit,
+		grants: map[[2]int64]access.Level{
+			{1, 100}: access.LevelNone,
+			{2, 100}: access.LevelView,
+			{3, 100}: access.LevelEdit,
 		},
 	}
 	runner := migration.NewRunner(repo, locker, exec)
@@ -250,8 +251,8 @@ func TestRunnerLinearVersioningAndFailureRecording(t *testing.T) {
 	locker := &noopLocker{}
 	exec := &stubExecutor{}
 	checker := &stubChecker{
-		grants: map[[2]int64]migration.AccessLevel{
-			{10, 1}: migration.LevelEdit,
+		grants: map[[2]int64]access.Level{
+			{10, 1}: access.LevelEdit,
 		},
 	}
 	fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
@@ -310,24 +311,5 @@ func TestRunnerLinearVersioningAndFailureRecording(t *testing.T) {
 	}
 	if _, err := svc.UpdateDraft(ctx, 10, 1, m2.ID, "Edited", "SELECT 1;"); !errors.Is(err, migration.ErrNotDraft) {
 		t.Fatalf("editing failed migration: got %v, want ErrNotDraft", err)
-	}
-}
-
-type externalLevel int
-
-type externalCheckerStub struct{}
-
-func (externalCheckerStub) EffectiveLevel(_ context.Context, userID, _ int64) (externalLevel, error) {
-	if userID == 42 {
-		return externalLevel(migration.LevelEdit), nil
-	}
-	return externalLevel(migration.LevelNone), nil
-}
-
-func TestAdaptChecker(t *testing.T) {
-	adapted := migration.AdaptChecker[externalLevel](externalCheckerStub{})
-	lvl, err := adapted.EffectiveLevel(context.Background(), 42, 1)
-	if err != nil || lvl != migration.LevelEdit {
-		t.Fatalf("AdaptChecker got (%v, %v), want (LevelEdit, nil)", lvl, err)
 	}
 }

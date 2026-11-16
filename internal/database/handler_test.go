@@ -1,9 +1,10 @@
-package handlers_test
+package database_test
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -11,33 +12,32 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 )
 
 type fakeReg struct {
-	dbs       []dbmanager.Database
-	created   []dbmanager.DatabaseInput
-	updated   []dbmanager.DatabaseInput
+	dbs       []database.Database
+	created   []database.DatabaseInput
+	updated   []database.DatabaseInput
 	deleted   []int64
 	createErr error
 }
 
-func (f *fakeReg) Create(_ context.Context, in dbmanager.DatabaseInput) (dbmanager.Database, error) {
+func (f *fakeReg) Create(_ context.Context, in database.DatabaseInput) (database.Database, error) {
 	f.created = append(f.created, in)
-	return dbmanager.Database{}, f.createErr
+	return database.Database{}, f.createErr
 }
-func (f *fakeReg) List(context.Context) ([]dbmanager.Database, error) { return f.dbs, nil }
-func (f *fakeReg) Get(_ context.Context, id int64) (dbmanager.Database, error) {
+func (f *fakeReg) List(context.Context) ([]database.Database, error) { return f.dbs, nil }
+func (f *fakeReg) Get(_ context.Context, id int64) (database.Database, error) {
 	for _, d := range f.dbs {
 		if d.ID == id {
 			return d, nil
 		}
 	}
-	return dbmanager.Database{}, dbmanager.ErrDatabaseNotFound
+	return database.Database{}, database.ErrDatabaseNotFound
 }
-func (f *fakeReg) Update(_ context.Context, _ int64, in dbmanager.DatabaseInput) error {
+func (f *fakeReg) Update(_ context.Context, _ int64, in database.DatabaseInput) error {
 	f.updated = append(f.updated, in)
 	return nil
 }
@@ -46,24 +46,24 @@ func (f *fakeReg) Delete(_ context.Context, id int64) error {
 	return nil
 }
 func (f *fakeReg) Pool(context.Context, int64) (*pgxpool.Pool, error) {
-	return nil, &dbmanager.ConnError{Reason: "server tidak dapat dihubungi"}
+	return nil, &database.ConnError{Reason: "server tidak dapat dihubungi"}
 }
 
 type fakeViewer struct {
-	tables    []dbmanager.Table
-	info      dbmanager.TableInfo
-	data      dbmanager.DataPage
+	tables    []database.Table
+	info      database.TableInfo
+	data      database.DataPage
 	err       error
 	rowsPages []int
 }
 
-func (f *fakeViewer) Tables(context.Context, int64) ([]dbmanager.Table, error) {
+func (f *fakeViewer) Tables(context.Context, int64) ([]database.Table, error) {
 	return f.tables, f.err
 }
-func (f *fakeViewer) TableInfo(context.Context, int64, string, string) (dbmanager.TableInfo, error) {
+func (f *fakeViewer) TableInfo(context.Context, int64, string, string) (database.TableInfo, error) {
 	return f.info, f.err
 }
-func (f *fakeViewer) Rows(_ context.Context, _ int64, _, _ string, page int) (dbmanager.DataPage, error) {
+func (f *fakeViewer) Rows(_ context.Context, _ int64, _, _ string, page int) (database.DataPage, error) {
 	f.rowsPages = append(f.rowsPages, page)
 	return f.data, f.err
 }
@@ -76,23 +76,23 @@ func (f fakeChecker) EffectiveLevel(_ context.Context, _, dbID int64) (access.Le
 }
 
 type dbRig struct {
-	h      *handlers.DatabaseHandler
+	h      *database.Handler
 	reg    *fakeReg
 	viewer *fakeViewer
 }
 
-func newDBRig(t *testing.T, levels map[int64]access.Level, test handlers.ConnTester) dbRig {
+func newDBRig(t *testing.T, levels map[int64]access.Level, test database.ConnTester) dbRig {
 	t.Helper()
 	tmpl, err := templates.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := &fakeReg{dbs: []dbmanager.Database{
+	reg := &fakeReg{dbs: []database.Database{
 		{ID: 1, Name: "sales", Host: "db1", Port: 5432, DBName: "sales", DBUser: "app", SSLMode: "prefer"},
 		{ID: 2, Name: "payroll", Host: "db2", Port: 5432, DBName: "payroll", DBUser: "app", SSLMode: "prefer"},
 	}}
-	v := &fakeViewer{tables: []dbmanager.Table{{Schema: "public", Name: "orders"}}}
-	return dbRig{h: handlers.NewDatabaseHandler(reg, v, fakeChecker{levels}, test, tmpl), reg: reg, viewer: v}
+	v := &fakeViewer{tables: []database.Table{{Schema: "public", Name: "orders"}}}
+	return dbRig{h: database.NewHandler(reg, v, fakeChecker{levels}, test, tmpl), reg: reg, viewer: v}
 }
 
 func TestDatabases_SelectListsOnlyAccessible(t *testing.T) {
@@ -131,7 +131,7 @@ func TestDatabases_AdminCreatePassesFormAndHidesPassword(t *testing.T) {
 
 func TestDatabases_AdminCreateErrorsStayOnForm(t *testing.T) {
 	rig := newDBRig(t, nil, nil)
-	rig.reg.createErr = dbmanager.ErrNameTaken
+	rig.reg.createErr = database.ErrNameTaken
 	rec := serve(rig.h.AdminCreate, adminRequest(http.MethodPost, "/admin/databases", url.Values{
 		"name": {"sales"}, "password": {"s3cret-pw"},
 	}, nil))
@@ -150,10 +150,10 @@ func TestDatabases_TestNewConnection(t *testing.T) {
 		want string
 	}{
 		"ok":     {nil, "Connection successful"},
-		"failed": {&dbmanager.ConnError{Reason: "koneksi timeout"}, "Could not connect"},
+		"failed": {&database.ConnError{Reason: "koneksi timeout"}, "Could not connect"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rig := newDBRig(t, nil, func(context.Context, dbmanager.DatabaseInput) error { return tc.err })
+			rig := newDBRig(t, nil, func(context.Context, database.DatabaseInput) error { return tc.err })
 			rec := serve(rig.h.AdminTestNew, adminRequest(http.MethodPost, "/admin/databases/test", url.Values{"host": {"h"}}, nil))
 			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Errorf("status %d, body %q", rec.Code, rec.Body.String())
@@ -206,14 +206,14 @@ func TestDatabases_NoAccessIs404(t *testing.T) {
 func TestDatabases_TablePageTabs(t *testing.T) {
 	d := "now()"
 	rig := newDBRig(t, map[int64]access.Level{1: access.LevelView}, nil)
-	rig.viewer.info = dbmanager.TableInfo{
-		Columns:     []dbmanager.Column{{Name: "id", Type: "integer"}, {Name: "created", Type: "timestamptz", Default: &d}},
-		Constraints: []dbmanager.Constraint{{Name: "orders_pkey", Type: "PRIMARY KEY", Definition: "PRIMARY KEY (id)"}},
-		Indexes:     []dbmanager.Index{{Name: "orders_pkey", Unique: true, Method: "btree", Definition: "CREATE UNIQUE INDEX ..."}},
+	rig.viewer.info = database.TableInfo{
+		Columns:     []database.Column{{Name: "id", Type: "integer"}, {Name: "created", Type: "timestamptz", Default: &d}},
+		Constraints: []database.Constraint{{Name: "orders_pkey", Type: "PRIMARY KEY", Definition: "PRIMARY KEY (id)"}},
+		Indexes:     []database.Index{{Name: "orders_pkey", Unique: true, Method: "btree", Definition: "CREATE UNIQUE INDEX ..."}},
 	}
-	rig.viewer.data = dbmanager.DataPage{
+	rig.viewer.data = database.DataPage{
 		Columns: []string{"id", "note"}, Page: 2, HasNext: true,
-		Rows: [][]dbmanager.Cell{{{Text: "1"}, {Null: true}}, {{Text: "<b>x</b>"}, {Text: "y"}}},
+		Rows: [][]database.Cell{{{Text: "1"}, {Null: true}}, {{Text: "<b>x</b>"}, {Text: "y"}}},
 	}
 
 	get := func(query string) string {
@@ -262,8 +262,8 @@ func TestDatabases_ViewerFailures(t *testing.T) {
 		code int
 		want string
 	}{
-		"connection": {&dbmanager.ConnError{Reason: "koneksi timeout"}, http.StatusBadGateway, "Cannot reach sales"},
-		"no table":   {dbmanager.ErrTableNotFound, http.StatusNotFound, ""},
+		"connection": {&database.ConnError{Reason: "koneksi timeout"}, http.StatusBadGateway, "Cannot reach sales"},
+		"no table":   {database.ErrTableNotFound, http.StatusNotFound, ""},
 		"other":      {errors.New("boom password=hunter2"), http.StatusInternalServerError, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -278,4 +278,25 @@ func TestDatabases_ViewerFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func adminRequest(method, target string, form url.Values, pathValues map[string]string) *http.Request {
+	var req *http.Request
+	if form != nil {
+		req = httptest.NewRequest(method, target, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	} else {
+		req = httptest.NewRequest(method, target, nil)
+	}
+	for k, v := range pathValues {
+		req.SetPathValue(k, v)
+	}
+	ctx := access.ContextWithUser(req.Context(), access.User{ID: 1, Username: "root", IsPlatformAdmin: true})
+	return req.WithContext(ctx)
+}
+
+func serve(handler http.HandlerFunc, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
 }

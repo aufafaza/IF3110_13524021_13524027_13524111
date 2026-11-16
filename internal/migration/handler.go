@@ -1,262 +1,48 @@
 package migration
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"html/template"
-	"io/fs"
+	"io"
+	"log"
+	"mime"
 	"net/http"
 	"strconv"
-	"strings"
-	"time"
 
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
-	migrationtemplates "github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 )
 
-type Handler struct {
-	service     *Service
-	extractUser UserExtractor
-	extractCSRF func(*http.Request) string
-	templates   *template.Template
-	mux         *http.ServeMux
-}
+type Handler struct{ service *Service }
 
-type HandlerOption func(*Handler)
+func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 
-func WithUserExtractor(fn UserExtractor) HandlerOption {
-	return func(h *Handler) {
-		if fn != nil {
-			h.extractUser = fn
-		}
-	}
-}
-
-func WithCSRFTokenExtractor(fn func(*http.Request) string) HandlerOption {
-	return func(h *Handler) {
-		if fn != nil {
-			h.extractCSRF = fn
-		}
-	}
-}
-
-func WithTemplateFS(fsys fs.FS) HandlerOption {
-	return func(h *Handler) {
-		if fsys != nil {
-			h.templates = mustParseTemplates(fsys)
-		}
-	}
-}
-
-func NewHandler(service *Service, opts ...HandlerOption) *Handler {
-	h := &Handler{
-		service:     service,
-		extractUser: UserFromContext,
-		extractCSRF: func(r *http.Request) string {
-			tok, _ := csrf.TokenFromContext(r.Context())
-			return tok
-		},
-		templates: mustParseTemplates(migrationtemplates.FS),
-		mux:       http.NewServeMux(),
-	}
-	for _, opt := range opts {
-		opt(h)
-	}
-	h.RegisterRoutes(h.mux)
-	return h
-}
-
-func mustParseTemplates(fsys fs.FS) *template.Template {
-	funcs := template.FuncMap{
-		"derefInt": func(p *int) int {
-			if p == nil {
-				return 0
-			}
-			return *p
-		},
-		"derefInt64": func(p *int64) int64 {
-			if p == nil {
-				return 0
-			}
-			return *p
-		},
-		"derefStr": func(p *string) string {
-			if p == nil {
-				return ""
-			}
-			return *p
-		},
-		"formatTime": func(t time.Time) string {
-			if t.IsZero() {
-				return "-"
-			}
-			return t.UTC().Format("2006-01-02 15:04:05 UTC")
-		},
-		"formatTimePtr": func(t *time.Time) string {
-			if t == nil || t.IsZero() {
-				return "-"
-			}
-			return t.UTC().Format("2006-01-02 15:04:05 UTC")
-		},
-		"formatFloatPtr": func(p *float64) string {
-			if p == nil {
-				return "-"
-			}
-			return fmt.Sprintf("%.3f ms", *p)
-		},
-		"formatInt64Ptr": func(p *int64) string {
-			if p == nil {
-				return "-"
-			}
-			return strconv.FormatInt(*p, 10)
-		},
-		"joinStrings": func(items []string) string {
-			if len(items) == 0 {
-				return "-"
-			}
-			return strings.Join(items, ", ")
-		},
-	}
-	return template.Must(template.New("").Funcs(funcs).ParseFS(fsys, "*.html"))
-}
-
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
-}
-
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	viewGuard := RequireDBAccess(h.service.checker, LevelView, h.extractUser)
-	editGuard := RequireDBAccess(h.service.checker, LevelEdit, h.extractUser)
-
-	mux.Handle("GET /databases/{dbID}/migrations", viewGuard(http.HandlerFunc(h.handleListHistory)))
-	mux.Handle("GET /databases/{dbID}/migrations/new", editGuard(http.HandlerFunc(h.handleNewEditor)))
-	mux.Handle("POST /databases/{dbID}/migrations", editGuard(http.HandlerFunc(h.handleCreateOrPreview)))
-	mux.Handle("GET /databases/{dbID}/migrations/{migrationID}", viewGuard(http.HandlerFunc(h.handleDetail)))
-	mux.Handle("GET /databases/{dbID}/migrations/{migrationID}/edit", editGuard(http.HandlerFunc(h.handleEditEditor)))
-	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}", editGuard(http.HandlerFunc(h.handleUpdateOrPreview)))
-	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", editGuard(http.HandlerFunc(h.handleExplain)))
-	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", editGuard(http.HandlerFunc(h.handleExecute)))
-}
-
-type historyViewData struct {
-	DatabaseID int64
-	CanEdit    bool
-	Executed   []Migration
-	Drafts     []Migration
-}
-
-type editorViewData struct {
-	DatabaseID int64
-	IsEdit     bool
-	Migration  Migration
-	Title      string
-	SQL        string
-	Preview    *PreviewResult
-	Error      string
-	CSRFToken  string
-}
-
-type detailViewData struct {
-	DatabaseID int64
-	CanEdit    bool
-	Migration  Migration
-	Statements []string
-	PlanReport *ExecutionPlanReport
-	Error      string
-	CSRFToken  string
-}
+var errInvalidRequest = errors.New("migration: invalid request")
 
 func (h *Handler) handleListHistory(w http.ResponseWriter, r *http.Request) {
 	user, dbID, ok := h.requireUserAndDB(w, r)
 	if !ok {
 		return
 	}
-
-	level, err := h.service.UserLevel(r.Context(), user.ID, dbID)
-	if err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-
 	items, err := h.service.ListHistory(r.Context(), user.ID, dbID)
 	if err != nil {
-		h.writeError(w, r, err)
+		writeError(w, err)
 		return
 	}
-
-	if wantsJSON(r) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"database_id": dbID,
-			"can_edit":    level >= LevelEdit,
-			"migrations":  items,
-		})
-		return
-	}
-
-	var executed, drafts []Migration
-	for _, m := range items {
-		if m.Status == StatusDraft {
-			drafts = append(drafts, m)
-		} else {
-			executed = append(executed, m)
-		}
-	}
-
-	h.renderTemplate(w, http.StatusOK, "history.html", historyViewData{
-		DatabaseID: dbID,
-		CanEdit:    level >= LevelEdit,
-		Executed:   executed,
-		Drafts:     drafts,
-	})
-}
-
-func (h *Handler) handleNewEditor(w http.ResponseWriter, r *http.Request) {
-	user, dbID, ok := h.requireUserAndDB(w, r)
-	if !ok {
-		return
-	}
-	if _, err := h.service.requireLevel(r.Context(), user.ID, dbID, LevelEdit); err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-
-	h.renderTemplate(w, http.StatusOK, "editor.html", editorViewData{
-		DatabaseID: dbID,
-		IsEdit:     false,
-		CSRFToken:  h.extractCSRF(r),
-	})
-}
-
-func (h *Handler) handleEditEditor(w http.ResponseWriter, r *http.Request) {
-	user, dbID, migID, ok := h.requireUserDBAndMigration(w, r)
-	if !ok {
-		return
-	}
-	if _, err := h.service.requireLevel(r.Context(), user.ID, dbID, LevelEdit); err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-
-	m, err := h.service.GetDetail(r.Context(), user.ID, dbID, migID)
+	level, err := h.service.UserLevel(r.Context(), user.ID, dbID)
 	if err != nil {
-		h.writeError(w, r, err)
+		writeError(w, err)
 		return
 	}
-	if m.Status != StatusDraft {
-		h.writeError(w, r, ErrNotDraft)
-		return
+	if items == nil {
+		items = []Migration{}
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"database_id": dbID, "can_edit": level >= access.LevelEdit, "migrations": items})
+}
 
-	h.renderTemplate(w, http.StatusOK, "editor.html", editorViewData{
-		DatabaseID: dbID,
-		IsEdit:     true,
-		Migration:  m,
-		Title:      m.Title,
-		SQL:        m.SQL,
-		CSRFToken:  h.extractCSRF(r),
-	})
+type migrationInput struct {
+	Title  string `json:"title"`
+	SQL    string `json:"sql"`
+	Action string `json:"action"`
 }
 
 func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) {
@@ -264,352 +50,168 @@ func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-
-	title, sqlStr, action, err := parseMigrationInput(r)
+	var in migrationInput
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if h.preview(w, r, user.ID, dbID, in) {
+		return
+	}
+	created, err := h.service.CreateDraft(r.Context(), user.ID, dbID, in.Title, in.SQL)
 	if err != nil {
-		h.writeError(w, r, err)
+		writeError(w, err)
 		return
 	}
-
-	if action == "preview" || action == "explain" || action == "explain_analyze" {
-		var preview PreviewResult
-		if action == "explain" || action == "explain_analyze" {
-			preview, err = h.service.AnalyzeSQL(r.Context(), user.ID, dbID, title, sqlStr, action == "explain_analyze")
-		} else {
-			preview, err = h.service.PreviewSQL(r.Context(), user.ID, dbID, title, sqlStr)
-		}
-		if err != nil {
-			if wantsJSON(r) {
-				h.writeError(w, r, err)
-				return
-			}
-			h.renderTemplate(w, statusForError(err), "editor.html", editorViewData{
-				DatabaseID: dbID,
-				IsEdit:     false,
-				Title:      title,
-				SQL:        sqlStr,
-				Error:      err.Error(),
-				CSRFToken:  h.extractCSRF(r),
-			})
-			return
-		}
-		if wantsJSON(r) {
-			writeJSON(w, http.StatusOK, preview)
-			return
-		}
-		h.renderTemplate(w, http.StatusOK, "editor.html", editorViewData{
-			DatabaseID: dbID,
-			IsEdit:     false,
-			Title:      preview.Title,
-			SQL:        preview.SQL,
-			Preview:    &preview,
-			CSRFToken:  h.extractCSRF(r),
-		})
-		return
-	}
-
-	created, err := h.service.CreateDraft(r.Context(), user.ID, dbID, title, sqlStr)
-	if err != nil {
-		if wantsJSON(r) {
-			h.writeError(w, r, err)
-			return
-		}
-		h.renderTemplate(w, statusForError(err), "editor.html", editorViewData{
-			DatabaseID: dbID,
-			IsEdit:     false,
-			Title:      title,
-			SQL:        sqlStr,
-			Error:      err.Error(),
-			CSRFToken:  h.extractCSRF(r),
-		})
-		return
-	}
-
-	if wantsJSON(r) {
-		writeJSON(w, http.StatusCreated, created)
-		return
-	}
-	http.Redirect(w, r, "/databases/"+strconv.FormatInt(dbID, 10)+"/migrations/"+strconv.FormatInt(created.ID, 10), http.StatusSeeOther)
+	w.Header().Set("Location", "/databases/"+strconv.FormatInt(dbID, 10)+"/migrations/"+strconv.FormatInt(created.ID, 10))
+	writeJSON(w, http.StatusCreated, created)
 }
 
 func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) {
-	user, dbID, migID, ok := h.requireUserDBAndMigration(w, r)
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
 		return
 	}
-
-	title, sqlStr, action, err := parseMigrationInput(r)
+	var in migrationInput
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if h.preview(w, r, user.ID, dbID, in) {
+		return
+	}
+	updated, err := h.service.UpdateDraft(r.Context(), user.ID, dbID, id, in.Title, in.SQL)
 	if err != nil {
-		h.writeError(w, r, err)
+		writeError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, updated)
+}
 
-	if action == "preview" || action == "explain" || action == "explain_analyze" {
-		var preview PreviewResult
-		if action == "explain" || action == "explain_analyze" {
-			preview, err = h.service.AnalyzeSQL(r.Context(), user.ID, dbID, title, sqlStr, action == "explain_analyze")
-		} else {
-			preview, err = h.service.PreviewSQL(r.Context(), user.ID, dbID, title, sqlStr)
-		}
-		if err != nil {
-			if wantsJSON(r) {
-				h.writeError(w, r, err)
-				return
-			}
-			h.renderTemplate(w, statusForError(err), "editor.html", editorViewData{
-				DatabaseID: dbID,
-				IsEdit:     true,
-				Migration:  Migration{ID: migID, DatabaseID: dbID, Status: StatusDraft},
-				Title:      title,
-				SQL:        sqlStr,
-				Error:      err.Error(),
-				CSRFToken:  h.extractCSRF(r),
-			})
-			return
-		}
-		if wantsJSON(r) {
-			writeJSON(w, http.StatusOK, preview)
-			return
-		}
-		h.renderTemplate(w, http.StatusOK, "editor.html", editorViewData{
-			DatabaseID: dbID,
-			IsEdit:     true,
-			Migration:  Migration{ID: migID, DatabaseID: dbID, Status: StatusDraft},
-			Title:      preview.Title,
-			SQL:        preview.SQL,
-			Preview:    &preview,
-			CSRFToken:  h.extractCSRF(r),
-		})
-		return
+func (h *Handler) preview(w http.ResponseWriter, r *http.Request, userID, dbID int64, in migrationInput) bool {
+	var result PreviewResult
+	var err error
+	switch in.Action {
+	case "", "save":
+		return false
+	case "preview":
+		result, err = h.service.PreviewSQL(r.Context(), userID, dbID, in.Title, in.SQL)
+	case "explain", "explain_analyze":
+		result, err = h.service.AnalyzeSQL(r.Context(), userID, dbID, in.Title, in.SQL, in.Action == "explain_analyze")
+	default:
+		writeError(w, errInvalidRequest)
+		return true
 	}
-
-	updated, err := h.service.UpdateDraft(r.Context(), user.ID, dbID, migID, title, sqlStr)
 	if err != nil {
-		if wantsJSON(r) {
-			h.writeError(w, r, err)
-			return
-		}
-		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrAlreadyApplied) || errors.Is(err, ErrNotDraft) {
-			h.writeError(w, r, err)
-			return
-		}
-		h.renderTemplate(w, statusForError(err), "editor.html", editorViewData{
-			DatabaseID: dbID,
-			IsEdit:     true,
-			Migration:  Migration{ID: migID, DatabaseID: dbID, Status: StatusDraft},
-			Title:      title,
-			SQL:        sqlStr,
-			Error:      err.Error(),
-			CSRFToken:  h.extractCSRF(r),
-		})
-		return
+		writeError(w, err)
+	} else {
+		writeJSON(w, http.StatusOK, result)
 	}
-
-	if wantsJSON(r) {
-		writeJSON(w, http.StatusOK, updated)
-		return
-	}
-	http.Redirect(w, r, "/databases/"+strconv.FormatInt(dbID, 10)+"/migrations/"+strconv.FormatInt(updated.ID, 10), http.StatusSeeOther)
+	return true
 }
 
 func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
-	user, dbID, migID, ok := h.requireUserDBAndMigration(w, r)
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
 		return
 	}
-
-	level, err := h.service.UserLevel(r.Context(), user.ID, dbID)
+	m, err := h.service.GetDetail(r.Context(), user.ID, dbID, id)
 	if err != nil {
-		h.writeError(w, r, err)
+		writeError(w, err)
 		return
 	}
-
-	m, err := h.service.GetDetail(r.Context(), user.ID, dbID, migID)
-	if err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-
-	if wantsJSON(r) {
-		writeJSON(w, http.StatusOK, m)
-		return
-	}
-
-	h.renderTemplate(w, http.StatusOK, "detail.html", detailViewData{
-		DatabaseID: dbID,
-		CanEdit:    level >= LevelEdit,
-		Migration:  m,
-		Statements: SplitStatements(m.SQL),
-		CSRFToken:  h.extractCSRF(r),
-	})
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (h *Handler) handleExplain(w http.ResponseWriter, r *http.Request) {
-	user, dbID, migID, ok := h.requireUserDBAndMigration(w, r)
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
 		return
 	}
-
-	analyze := parseAnalyzeInput(r)
-
-	m, err := h.service.GetDetail(r.Context(), user.ID, dbID, migID)
+	var in struct {
+		Analyze bool `json:"analyze"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	report, err := h.service.ExplainMigration(r.Context(), user.ID, dbID, id, in.Analyze)
 	if err != nil {
-		h.writeError(w, r, err)
+		writeError(w, err)
 		return
 	}
-
-	report, err := h.service.ExplainMigration(r.Context(), user.ID, dbID, migID, analyze)
-	if err != nil {
-		if wantsJSON(r) {
-			h.writeError(w, r, err)
-			return
-		}
-		h.renderTemplate(w, statusForError(err), "detail.html", detailViewData{
-			DatabaseID: dbID,
-			CanEdit:    true,
-			Migration:  m,
-			Statements: SplitStatements(m.SQL),
-			Error:      err.Error(),
-			CSRFToken:  h.extractCSRF(r),
-		})
-		return
-	}
-
-	if wantsJSON(r) {
-		writeJSON(w, http.StatusOK, report)
-		return
-	}
-
-	h.renderTemplate(w, http.StatusOK, "detail.html", detailViewData{
-		DatabaseID: dbID,
-		CanEdit:    true,
-		Migration:  m,
-		Statements: SplitStatements(m.SQL),
-		PlanReport: &report,
-		CSRFToken:  h.extractCSRF(r),
-	})
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
-	user, dbID, migID, ok := h.requireUserDBAndMigration(w, r)
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
 		return
 	}
-
-	confirmed, err := parseConfirmInput(r)
-	if err != nil || !confirmed {
-		h.writeError(w, r, ErrConfirmationMissing)
+	var in struct {
+		Confirm bool `json:"confirm"`
+	}
+	if !readJSON(w, r, &in) {
 		return
 	}
-
-	executed, execErr := h.service.Execute(r.Context(), user.ID, dbID, migID)
-	if execErr != nil {
+	if !in.Confirm {
+		writeError(w, ErrConfirmationMissing)
+		return
+	}
+	executed, err := h.service.Execute(r.Context(), user.ID, dbID, id)
+	if err != nil {
 		if executed.ID != 0 && executed.Status == StatusFailed {
-			if wantsJSON(r) {
-				writeJSON(w, http.StatusUnprocessableEntity, executed)
-				return
-			}
-			h.renderTemplate(w, http.StatusUnprocessableEntity, "detail.html", detailViewData{
-				DatabaseID: dbID,
-				CanEdit:    true,
-				Migration:  executed,
-				Statements: SplitStatements(executed.SQL),
-				CSRFToken:  h.extractCSRF(r),
-			})
-			return
+			writeJSON(w, http.StatusUnprocessableEntity, executed)
+		} else {
+			writeError(w, err)
 		}
-		h.writeError(w, r, execErr)
 		return
 	}
-
-	if wantsJSON(r) {
-		writeJSON(w, http.StatusOK, executed)
-		return
-	}
-	http.Redirect(w, r, "/databases/"+strconv.FormatInt(dbID, 10)+"/migrations/"+strconv.FormatInt(executed.ID, 10), http.StatusSeeOther)
+	writeJSON(w, http.StatusOK, executed)
 }
 
-func (h *Handler) requireUserAndDB(w http.ResponseWriter, r *http.Request) (User, int64, bool) {
-	user, ok := h.extractUser(r.Context())
+func (h *Handler) requireUserAndDB(w http.ResponseWriter, r *http.Request) (access.User, int64, bool) {
+	user, ok := access.UserFromContext(r.Context())
 	if !ok || user.ID <= 0 {
-		h.writeError(w, r, ErrUnauthenticated)
-		return User{}, 0, false
+		writeError(w, ErrUnauthenticated)
+		return access.User{}, 0, false
 	}
-	dbID, err := strconv.ParseInt(r.PathValue("dbID"), 10, 64)
-	if err != nil || dbID <= 0 {
-		http.Error(w, "invalid database id", http.StatusBadRequest)
-		return User{}, 0, false
+	id, err := strconv.ParseInt(r.PathValue(access.DatabaseIDParam), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, errInvalidRequest)
+		return access.User{}, 0, false
 	}
-	return user, dbID, true
+	return user, id, true
 }
 
-func (h *Handler) requireUserDBAndMigration(w http.ResponseWriter, r *http.Request) (User, int64, int64, bool) {
+func (h *Handler) requireUserDBAndMigration(w http.ResponseWriter, r *http.Request) (access.User, int64, int64, bool) {
 	user, dbID, ok := h.requireUserAndDB(w, r)
 	if !ok {
-		return User{}, 0, 0, false
+		return access.User{}, 0, 0, false
 	}
-	migID, err := strconv.ParseInt(r.PathValue("migrationID"), 10, 64)
-	if err != nil || migID <= 0 {
-		http.Error(w, "invalid migration id", http.StatusBadRequest)
-		return User{}, 0, 0, false
+	id, err := strconv.ParseInt(r.PathValue("migrationID"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, errInvalidRequest)
+		return access.User{}, 0, 0, false
 	}
-	return user, dbID, migID, true
+	return user, dbID, id, true
 }
 
-func parseMigrationInput(r *http.Request) (title, sqlStr, action string, err error) {
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		var body struct {
-			Title  string `json:"title"`
-			SQL    string `json:"sql"`
-			Action string `json:"action"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			return "", "", "", err
-		}
-		return body.Title, body.SQL, body.Action, nil
-	}
-	if err := r.ParseForm(); err != nil {
-		return "", "", "", err
-	}
-	return r.FormValue("title"), r.FormValue("sql"), r.FormValue("action"), nil
-}
-
-func parseConfirmInput(r *http.Request) (bool, error) {
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		var body struct {
-			Confirm bool `json:"confirm"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			return false, err
-		}
-		return body.Confirm, nil
-	}
-	if err := r.ParseForm(); err != nil {
-		return false, err
-	}
-	v := strings.ToLower(strings.TrimSpace(r.FormValue("confirm")))
-	return v == "true" || v == "1" || v == "on" || v == "yes", nil
-}
-
-func parseAnalyzeInput(r *http.Request) bool {
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		var body struct {
-			Analyze bool `json:"analyze"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-			return body.Analyze
-		}
+func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
 		return false
 	}
-	_ = r.ParseForm()
-	v := strings.ToLower(strings.TrimSpace(r.FormValue("analyze")))
-	return v == "true" || v == "1" || v == "on" || v == "yes"
-}
-
-func wantsJSON(r *http.Request) bool {
-	accept := r.Header.Get("Accept")
-	ct := r.Header.Get("Content-Type")
-	return strings.Contains(accept, "application/json") || strings.HasPrefix(ct, "application/json")
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		writeError(w, errInvalidRequest)
+		return false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeError(w, errInvalidRequest)
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -618,28 +220,20 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func (h *Handler) renderTemplate(w http.ResponseWriter, status int, name string, data any) {
-	var buf bytes.Buffer
-	if err := h.templates.ExecuteTemplate(&buf, name, data); err != nil {
-		http.Error(w, "template render error: "+err.Error(), http.StatusInternalServerError)
-		return
+func writeError(w http.ResponseWriter, err error) {
+	status := statusForError(err)
+	message := err.Error()
+	if status == http.StatusInternalServerError {
+		log.Printf("migration: %v", err)
+		message = "internal error"
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = buf.WriteTo(w)
-}
-
-func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
-	code := statusForError(err)
-	if wantsJSON(r) {
-		writeJSON(w, code, map[string]string{"error": err.Error()})
-		return
-	}
-	http.Error(w, err.Error(), code)
+	writeJSON(w, status, map[string]string{"error": message})
 }
 
 func statusForError(err error) int {
 	switch {
+	case errors.Is(err, errInvalidRequest):
+		return http.StatusBadRequest
 	case errors.Is(err, ErrUnauthenticated):
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrForbidden):
