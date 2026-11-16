@@ -1,4 +1,4 @@
-package dbmanager_test
+package database_test
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/migrations"
 )
@@ -46,7 +46,7 @@ func must(t *testing.T, err error) {
 	}
 }
 
-func setup(t *testing.T) (context.Context, *pgxpool.Pool, *dbmanager.Registry, dbmanager.DatabaseInput) {
+func setup(t *testing.T) (context.Context, *pgxpool.Pool, *database.Registry, database.DatabaseInput) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -62,26 +62,26 @@ func setup(t *testing.T) (context.Context, *pgxpool.Pool, *dbmanager.Registry, d
 	_, err = pool.Exec(ctx, fixtureSQL)
 	must(t, err)
 
-	c, err := dbmanager.NewCipher(bytes.Repeat([]byte{7}, 32))
+	c, err := database.NewCipher(bytes.Repeat([]byte{7}, 32))
 	must(t, err)
-	reg := dbmanager.NewRegistry(pool, c)
+	reg := database.NewRegistry(pool, c)
 	t.Cleanup(reg.Close)
 
 	cfg, err := pgxpool.ParseConfig(dsn)
 	must(t, err)
 	cc := cfg.ConnConfig
-	return ctx, pool, reg, dbmanager.DatabaseInput{
+	return ctx, pool, reg, database.DatabaseInput{
 		Name: "fixture", Host: cc.Host, Port: int(cc.Port), DBName: cc.Database,
 		DBUser: cc.User, Password: cc.Password, SSLMode: "disable",
 	}
 }
 
-func newViewer(t *testing.T) (context.Context, *dbmanager.Viewer, int64) {
+func newViewer(t *testing.T) (context.Context, *database.Viewer, int64) {
 	t.Helper()
 	ctx, _, reg, in := setup(t)
 	d, err := reg.Create(ctx, in)
 	must(t, err)
-	return ctx, dbmanager.NewViewer(reg), d.ID
+	return ctx, database.NewViewer(reg), d.ID
 }
 
 func TestCreateEncryptsPassword(t *testing.T) {
@@ -100,7 +100,7 @@ func TestCreateDuplicateName(t *testing.T) {
 	ctx, _, reg, in := setup(t)
 	_, err := reg.Create(ctx, in)
 	must(t, err)
-	if _, err := reg.Create(ctx, in); !errors.Is(err, dbmanager.ErrNameTaken) {
+	if _, err := reg.Create(ctx, in); !errors.Is(err, database.ErrNameTaken) {
 		t.Fatalf("err = %v, want ErrNameTaken", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestUpdateKeepsPasswordWhenBlank(t *testing.T) {
 	must(t, err)
 	must(t, p.Ping(ctx))
 
-	if err := reg.Update(ctx, 9999, upd); !errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+	if err := reg.Update(ctx, 9999, upd); !errors.Is(err, database.ErrDatabaseNotFound) {
 		t.Errorf("update id tak dikenal: err = %v", err)
 	}
 }
@@ -134,13 +134,13 @@ func TestDeleteRemovesDatabase(t *testing.T) {
 	must(t, err)
 	must(t, reg.Delete(ctx, d.ID))
 
-	if _, err := reg.Get(ctx, d.ID); !errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+	if _, err := reg.Get(ctx, d.ID); !errors.Is(err, database.ErrDatabaseNotFound) {
 		t.Errorf("Get: err = %v", err)
 	}
-	if _, err := reg.Pool(ctx, d.ID); !errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+	if _, err := reg.Pool(ctx, d.ID); !errors.Is(err, database.ErrDatabaseNotFound) {
 		t.Errorf("Pool: err = %v", err)
 	}
-	if err := reg.Delete(ctx, d.ID); !errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+	if err := reg.Delete(ctx, d.ID); !errors.Is(err, database.ErrDatabaseNotFound) {
 		t.Errorf("Delete ulang: err = %v", err)
 	}
 }
@@ -149,25 +149,25 @@ func TestConnectionFailures(t *testing.T) {
 	ctx, _, _, base := setup(t)
 	tests := []struct {
 		name   string
-		mutate func(*dbmanager.DatabaseInput)
+		mutate func(*database.DatabaseInput)
 		reason string
 	}{
-		{"user tidak ada", func(i *dbmanager.DatabaseInput) { i.DBUser = "tidak_ada" }, "username atau password database salah"},
-		{"database tidak ada", func(i *dbmanager.DatabaseInput) { i.DBName = "tidak_ada" }, "database tidak ditemukan di server"},
-		{"server tidak aktif", func(i *dbmanager.DatabaseInput) { i.Port = 1 }, "server tidak dapat dihubungi"},
+		{"user tidak ada", func(i *database.DatabaseInput) { i.DBUser = "tidak_ada" }, "username atau password database salah"},
+		{"database tidak ada", func(i *database.DatabaseInput) { i.DBName = "tidak_ada" }, "database tidak ditemukan di server"},
+		{"server tidak aktif", func(i *database.DatabaseInput) { i.Port = 1 }, "server tidak dapat dihubungi"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := base
 			tt.mutate(&in)
-			err := dbmanager.TestConnection(ctx, in)
-			var ce *dbmanager.ConnError
-			if !errors.Is(err, dbmanager.ErrConnectionFailed) || !errors.As(err, &ce) || ce.Reason != tt.reason {
+			err := database.TestConnection(ctx, in)
+			var ce *database.ConnError
+			if !errors.Is(err, database.ErrConnectionFailed) || !errors.As(err, &ce) || ce.Reason != tt.reason {
 				t.Fatalf("err = %v, want reason %q", err, tt.reason)
 			}
 		})
 	}
-	if err := dbmanager.TestConnection(ctx, base); err != nil {
+	if err := database.TestConnection(ctx, base); err != nil {
 		t.Fatalf("koneksi valid ditolak: %v", err)
 	}
 }
@@ -179,7 +179,7 @@ func TestFailedPoolIsNotCached(t *testing.T) {
 	d, err := reg.Create(ctx, bad)
 	must(t, err)
 
-	if _, err := reg.Pool(ctx, d.ID); !errors.Is(err, dbmanager.ErrConnectionFailed) {
+	if _, err := reg.Pool(ctx, d.ID); !errors.Is(err, database.ErrConnectionFailed) {
 		t.Fatalf("err = %v, want ErrConnectionFailed", err)
 	}
 	must(t, reg.Update(ctx, d.ID, in))
@@ -190,7 +190,7 @@ func TestFailedPoolIsNotCached(t *testing.T) {
 
 func TestViewerUnknownDatabase(t *testing.T) {
 	ctx, v, _ := newViewer(t)
-	if _, err := v.Tables(ctx, 9999); !errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+	if _, err := v.Tables(ctx, 9999); !errors.Is(err, database.ErrDatabaseNotFound) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestViewerTableInfo(t *testing.T) {
 	info, err := v.TableInfo(ctx, id, "viewer_fixture", "books")
 	must(t, err)
 
-	cols := map[string]dbmanager.Column{}
+	cols := map[string]database.Column{}
 	for _, c := range info.Columns {
 		cols[c.Name] = c
 	}
@@ -246,7 +246,7 @@ func TestViewerTableInfo(t *testing.T) {
 		}
 	}
 
-	idx := map[string]dbmanager.Index{}
+	idx := map[string]database.Index{}
 	for _, i := range info.Indexes {
 		idx[i.Name] = i
 	}
@@ -276,10 +276,10 @@ func TestViewerRejectsUnknownTable(t *testing.T) {
 		{"pg_catalog", "pg_class"},
 	}
 	for _, a := range attempts {
-		if _, err := v.TableInfo(ctx, id, a.schema, a.table); !errors.Is(err, dbmanager.ErrTableNotFound) {
+		if _, err := v.TableInfo(ctx, id, a.schema, a.table); !errors.Is(err, database.ErrTableNotFound) {
 			t.Errorf("TableInfo(%q.%q): err = %v", a.schema, a.table, err)
 		}
-		if _, err := v.Rows(ctx, id, a.schema, a.table, 1); !errors.Is(err, dbmanager.ErrTableNotFound) {
+		if _, err := v.Rows(ctx, id, a.schema, a.table, 1); !errors.Is(err, database.ErrTableNotFound) {
 			t.Errorf("Rows(%q.%q): err = %v", a.schema, a.table, err)
 		}
 	}
@@ -317,7 +317,7 @@ func TestViewerRowsNullAndClip(t *testing.T) {
 	dp, err := v.Rows(ctx, id, "viewer_fixture", "authors", 1)
 	must(t, err)
 
-	byName := map[string][]dbmanager.Cell{}
+	byName := map[string][]database.Cell{}
 	for _, r := range dp.Rows {
 		byName[r[1].Text] = r
 	}

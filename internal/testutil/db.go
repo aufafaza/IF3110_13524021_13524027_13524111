@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/migrations"
 )
@@ -89,11 +89,11 @@ type StaticProvider struct {
 
 func (p *StaticProvider) Pool(_ context.Context, databaseID int64) (*pgxpool.Pool, error) {
 	if p == nil || p.Pools == nil {
-		return nil, dbmanager.ErrDatabaseNotFound
+		return nil, database.ErrDatabaseNotFound
 	}
 	pool, ok := p.Pools[databaseID]
 	if !ok || pool == nil {
-		return nil, dbmanager.ErrDatabaseNotFound
+		return nil, database.ErrDatabaseNotFound
 	}
 	return pool, nil
 }

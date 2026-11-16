@@ -1,4 +1,4 @@
-package handlers
+package admin
 
 import (
 	"context"
@@ -8,39 +8,38 @@ import (
 	"strconv"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 )
 
 type AdminService interface {
-	ListUsers(ctx context.Context) ([]admin.User, error)
+	ListUsers(ctx context.Context) ([]User, error)
 	CreateUser(ctx context.Context, username, password string, isPlatformAdmin bool) error
 	SetUserActive(ctx context.Context, actorID, userID int64, active bool) error
 	ResetPassword(ctx context.Context, userID int64, newPassword string) error
 
-	ListGroups(ctx context.Context) ([]admin.Group, error)
-	GetGroup(ctx context.Context, groupID int64) (admin.Group, error)
+	ListGroups(ctx context.Context) ([]Group, error)
+	GetGroup(ctx context.Context, groupID int64) (Group, error)
 	CreateGroup(ctx context.Context, name string) error
 	DeleteGroup(ctx context.Context, actorID, groupID int64) error
 
-	ListMembers(ctx context.Context, groupID int64) ([]admin.User, error)
-	ListNonMembers(ctx context.Context, groupID int64) ([]admin.User, error)
+	ListMembers(ctx context.Context, groupID int64) ([]User, error)
+	ListNonMembers(ctx context.Context, groupID int64) ([]User, error)
 	AddMember(ctx context.Context, actorID, groupID, userID int64) error
 	RemoveMember(ctx context.Context, actorID, groupID, userID int64) error
 
-	ListDatabases(ctx context.Context) ([]admin.Database, error)
-	ListGrants(ctx context.Context, groupID int64) ([]admin.Grant, error)
+	ListDatabases(ctx context.Context) ([]Database, error)
+	ListGrants(ctx context.Context, groupID int64) ([]Grant, error)
 	SetGrant(ctx context.Context, actorID, groupID, databaseID int64, level access.Level) error
 	RemoveGrant(ctx context.Context, actorID, groupID, databaseID int64) error
 }
 
-type AdminHandler struct {
+type Handler struct {
 	svc  AdminService
 	tmpl *templates.Set
 }
 
-func NewAdminHandler(svc AdminService, tmpl *templates.Set) *AdminHandler {
-	return &AdminHandler{svc: svc, tmpl: tmpl}
+func NewHandler(svc AdminService, tmpl *templates.Set) *Handler {
+	return &Handler{svc: svc, tmpl: tmpl}
 }
 
 type notice struct {
@@ -50,52 +49,52 @@ type notice struct {
 
 type usersView struct {
 	notice
-	Users         []admin.User
+	Users         []User
 	CurrentUserID int64
 }
 
 type groupsView struct {
 	notice
-	Groups []admin.Group
+	Groups []Group
 }
 
 type membersView struct {
 	notice
 	GroupID    int64
-	Members    []admin.User
-	Candidates []admin.User
+	Members    []User
+	Candidates []User
 }
 
 type grantsView struct {
 	notice
 	GroupID   int64
-	Grants    []admin.Grant
-	Databases []admin.Database
+	Grants    []Grant
+	Databases []Database
 }
 
 type groupPage struct {
-	Group   admin.Group
+	Group   Group
 	Members membersView
 	Grants  grantsView
 }
 
 func userMessage(err error) (string, bool) {
-	var ve *admin.ValidationError
+	var ve *ValidationError
 	switch {
 	case errors.As(err, &ve):
 		return ve.Msg, true
-	case errors.Is(err, admin.ErrUsernameTaken):
+	case errors.Is(err, ErrUsernameTaken):
 		return "That username is already taken.", true
-	case errors.Is(err, admin.ErrGroupNameTaken):
+	case errors.Is(err, ErrGroupNameTaken):
 		return "A group with that name already exists.", true
-	case errors.Is(err, admin.ErrSelfDeactivate):
+	case errors.Is(err, ErrSelfDeactivate):
 		return "You cannot deactivate your own account.", true
 	}
 	return "", false
 }
 
-func (h *AdminHandler) fail(w http.ResponseWriter, op string, err error) {
-	if errors.Is(err, admin.ErrNotFound) {
+func (h *Handler) fail(w http.ResponseWriter, op string, err error) {
+	if errors.Is(err, ErrNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -103,7 +102,7 @@ func (h *AdminHandler) fail(w http.ResponseWriter, op string, err error) {
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
-func (h *AdminHandler) outcome(w http.ResponseWriter, op string, err error, success string) (notice, bool) {
+func (h *Handler) outcome(w http.ResponseWriter, op string, err error, success string) (notice, bool) {
 	if err == nil {
 		return notice{Message: success}, true
 	}
@@ -129,7 +128,7 @@ func actorID(r *http.Request) int64 {
 	return user.ID
 }
 
-func (h *AdminHandler) UsersPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
 	view, ok := h.usersView(w, r, notice{})
 	if !ok {
 		return
@@ -137,7 +136,7 @@ func (h *AdminHandler) UsersPage(w http.ResponseWriter, r *http.Request) {
 	h.tmpl.Page(w, r, http.StatusOK, "admin/users", "Users", view)
 }
 
-func (h *AdminHandler) usersView(w http.ResponseWriter, r *http.Request, n notice) (usersView, bool) {
+func (h *Handler) usersView(w http.ResponseWriter, r *http.Request, n notice) (usersView, bool) {
 	users, err := h.svc.ListUsers(r.Context())
 	if err != nil {
 		h.fail(w, "list users", err)
@@ -146,13 +145,13 @@ func (h *AdminHandler) usersView(w http.ResponseWriter, r *http.Request, n notic
 	return usersView{notice: n, Users: users, CurrentUserID: actorID(r)}, true
 }
 
-func (h *AdminHandler) renderUsers(w http.ResponseWriter, r *http.Request, n notice) {
+func (h *Handler) renderUsers(w http.ResponseWriter, r *http.Request, n notice) {
 	if view, ok := h.usersView(w, r, n); ok {
 		h.tmpl.Fragment(w, http.StatusOK, "admin/users", "users", view)
 	}
 }
 
-func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -165,7 +164,7 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	h.renderUsers(w, r, n)
 }
 
-func (h *AdminHandler) SetUserActive(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) SetUserActive(w http.ResponseWriter, r *http.Request) {
 	userID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -192,7 +191,7 @@ func (h *AdminHandler) SetUserActive(w http.ResponseWriter, r *http.Request) {
 	h.renderUsers(w, r, n)
 }
 
-func (h *AdminHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	userID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -210,7 +209,7 @@ func (h *AdminHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	h.renderUsers(w, r, n)
 }
 
-func (h *AdminHandler) renderGroups(w http.ResponseWriter, r *http.Request, n notice) {
+func (h *Handler) renderGroups(w http.ResponseWriter, r *http.Request, n notice) {
 	groups, err := h.svc.ListGroups(r.Context())
 	if err != nil {
 		h.fail(w, "list groups", err)
@@ -219,7 +218,7 @@ func (h *AdminHandler) renderGroups(w http.ResponseWriter, r *http.Request, n no
 	h.tmpl.Fragment(w, http.StatusOK, "admin/groups", "groups", groupsView{notice: n, Groups: groups})
 }
 
-func (h *AdminHandler) GroupsPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GroupsPage(w http.ResponseWriter, r *http.Request) {
 	groups, err := h.svc.ListGroups(r.Context())
 	if err != nil {
 		h.fail(w, "list groups", err)
@@ -228,7 +227,7 @@ func (h *AdminHandler) GroupsPage(w http.ResponseWriter, r *http.Request) {
 	h.tmpl.Page(w, r, http.StatusOK, "admin/groups", "Groups", groupsView{Groups: groups})
 }
 
-func (h *AdminHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -240,7 +239,7 @@ func (h *AdminHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	h.renderGroups(w, r, n)
 }
 
-func (h *AdminHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 	groupID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -253,7 +252,7 @@ func (h *AdminHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 	h.renderGroups(w, r, n)
 }
 
-func (h *AdminHandler) membersView(w http.ResponseWriter, r *http.Request, groupID int64, n notice) (membersView, bool) {
+func (h *Handler) membersView(w http.ResponseWriter, r *http.Request, groupID int64, n notice) (membersView, bool) {
 	members, err := h.svc.ListMembers(r.Context(), groupID)
 	if err != nil {
 		h.fail(w, "list members", err)
@@ -267,7 +266,7 @@ func (h *AdminHandler) membersView(w http.ResponseWriter, r *http.Request, group
 	return membersView{notice: n, GroupID: groupID, Members: members, Candidates: candidates}, true
 }
 
-func (h *AdminHandler) grantsView(w http.ResponseWriter, r *http.Request, groupID int64, n notice) (grantsView, bool) {
+func (h *Handler) grantsView(w http.ResponseWriter, r *http.Request, groupID int64, n notice) (grantsView, bool) {
 	grants, err := h.svc.ListGrants(r.Context(), groupID)
 	if err != nil {
 		h.fail(w, "list grants", err)
@@ -281,19 +280,19 @@ func (h *AdminHandler) grantsView(w http.ResponseWriter, r *http.Request, groupI
 	return grantsView{notice: n, GroupID: groupID, Grants: grants, Databases: databases}, true
 }
 
-func (h *AdminHandler) renderMembers(w http.ResponseWriter, r *http.Request, groupID int64, n notice) {
+func (h *Handler) renderMembers(w http.ResponseWriter, r *http.Request, groupID int64, n notice) {
 	if view, ok := h.membersView(w, r, groupID, n); ok {
 		h.tmpl.Fragment(w, http.StatusOK, "admin/group", "members", view)
 	}
 }
 
-func (h *AdminHandler) renderGrants(w http.ResponseWriter, r *http.Request, groupID int64, n notice) {
+func (h *Handler) renderGrants(w http.ResponseWriter, r *http.Request, groupID int64, n notice) {
 	if view, ok := h.grantsView(w, r, groupID, n); ok {
 		h.tmpl.Fragment(w, http.StatusOK, "admin/group", "grants", view)
 	}
 }
 
-func (h *AdminHandler) GroupPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GroupPage(w http.ResponseWriter, r *http.Request) {
 	groupID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -315,7 +314,7 @@ func (h *AdminHandler) GroupPage(w http.ResponseWriter, r *http.Request) {
 	h.tmpl.Page(w, r, http.StatusOK, "admin/group", group.Name, groupPage{Group: group, Members: members, Grants: grants})
 }
 
-func (h *AdminHandler) AddMember(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AddMember(w http.ResponseWriter, r *http.Request) {
 	groupID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -337,7 +336,7 @@ func (h *AdminHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	h.renderMembers(w, r, groupID, n)
 }
 
-func (h *AdminHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	groupID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -355,7 +354,7 @@ func (h *AdminHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	h.renderMembers(w, r, groupID, n)
 }
 
-func (h *AdminHandler) SetGrant(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) SetGrant(w http.ResponseWriter, r *http.Request) {
 	groupID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -382,7 +381,7 @@ func (h *AdminHandler) SetGrant(w http.ResponseWriter, r *http.Request) {
 	h.renderGrants(w, r, groupID, n)
 }
 
-func (h *AdminHandler) RemoveGrant(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) RemoveGrant(w http.ResponseWriter, r *http.Request) {
 	groupID, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)

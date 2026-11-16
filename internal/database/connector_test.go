@@ -1,4 +1,4 @@
-package dbmanager
+package database
 
 import (
 	"context"

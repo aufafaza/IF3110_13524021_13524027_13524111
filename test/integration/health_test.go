@@ -8,16 +8,16 @@ import (
 	"testing"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 )
 
 func TestHealthOverHTTP(t *testing.T) {
 	cookie := session.CookieConfig{Name: "session"}
 	srv := httptest.NewServer(web.New(web.Deps{
-		Auth:         handlers.NewAuthHandler(nil, nil, cookie),
+		Auth:         auth.NewHandler(nil, nil, cookie),
 		Authenticate: middleware.NewAuthenticator(nil, nil, cookie),
 		Guard:        access.NewGuard(nil, "/login"),
 	}))

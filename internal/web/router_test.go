@@ -12,9 +12,9 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 )
@@ -61,7 +61,7 @@ func (fakeLogin) Login(_ context.Context, _, _ string) (access.User, error) {
 }
 
 type fakeAdmin struct {
-	handlers.AdminService
+	admin.AdminService
 	created []string
 }
 
@@ -93,9 +93,9 @@ func newRig(t *testing.T, sessions *fakeSessions, isAdmin bool) testRig {
 	adminSvc := &fakeAdmin{}
 	cookie := session.CookieConfig{Name: testCookie, SameSite: http.SameSiteLaxMode}
 	h := New(Deps{
-		Auth:         handlers.NewAuthHandler(fakeLogin{}, sessions, cookie),
-		Home:         handlers.NewHomeHandler(tmpl),
-		Admin:        handlers.NewAdminHandler(adminSvc, tmpl),
+		Auth:         auth.NewHandler(fakeLogin{}, sessions, cookie),
+		Home:         home.NewHandler(tmpl),
+		Admin:        admin.NewHandler(adminSvc, tmpl),
 		Authenticate: middleware.NewAuthenticator(sessions, fakeUsers{admin: isAdmin}, cookie),
 		Guard:        access.NewGuard(nil, "/login"),
 	})

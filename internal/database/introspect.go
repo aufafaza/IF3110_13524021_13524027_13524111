@@ -1,4 +1,4 @@
-package dbmanager
+package database
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 var ErrTableNotFound = errors.New("dbmanager: table not found")
 
 type (
-	Table struct{ Schema, Name string }
+	Table  struct{ Schema, Name string }
 	Column struct {
 		Name, Type string
 		Nullable   bool
@@ -18,9 +18,9 @@ type (
 	}
 	Constraint struct{ Name, Type, Definition string }
 	Index      struct {
-		Name      string
-		Unique    bool
-		Method    string
+		Name       string
+		Unique     bool
+		Method     string
 		Definition string
 	}
 	TableInfo struct {

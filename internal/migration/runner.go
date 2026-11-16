@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 )
 
 const (
@@ -18,10 +18,10 @@ type Executor interface {
 }
 
 type TargetPostgresExecutor struct {
-	provider dbmanager.Provider
+	provider database.Provider
 }
 
-func NewTargetPostgresExecutor(provider dbmanager.Provider) *TargetPostgresExecutor {
+func NewTargetPostgresExecutor(provider database.Provider) *TargetPostgresExecutor {
 	return &TargetPostgresExecutor{provider: provider}
 }
 

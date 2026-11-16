@@ -1,4 +1,4 @@
-package handlers
+package database
 
 import (
 	"context"
@@ -13,28 +13,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 )
 
 type DatabaseRegistry interface {
-	Create(ctx context.Context, in dbmanager.DatabaseInput) (dbmanager.Database, error)
-	List(ctx context.Context) ([]dbmanager.Database, error)
-	Get(ctx context.Context, id int64) (dbmanager.Database, error)
-	Update(ctx context.Context, id int64, in dbmanager.DatabaseInput) error
+	Create(ctx context.Context, in DatabaseInput) (Database, error)
+	List(ctx context.Context) ([]Database, error)
+	Get(ctx context.Context, id int64) (Database, error)
+	Update(ctx context.Context, id int64, in DatabaseInput) error
 	Delete(ctx context.Context, id int64) error
 	Pool(ctx context.Context, id int64) (*pgxpool.Pool, error)
 }
 
 type DatabaseViewer interface {
-	Tables(ctx context.Context, dbID int64) ([]dbmanager.Table, error)
-	TableInfo(ctx context.Context, dbID int64, schema, table string) (dbmanager.TableInfo, error)
-	Rows(ctx context.Context, dbID int64, schema, table string, page int) (dbmanager.DataPage, error)
+	Tables(ctx context.Context, dbID int64) ([]Table, error)
+	TableInfo(ctx context.Context, dbID int64, schema, table string) (TableInfo, error)
+	Rows(ctx context.Context, dbID int64, schema, table string, page int) (DataPage, error)
 }
 
-type ConnTester func(ctx context.Context, in dbmanager.DatabaseInput) error
+type ConnTester func(ctx context.Context, in DatabaseInput) error
 
-type DatabaseHandler struct {
+type Handler struct {
 	reg     DatabaseRegistry
 	viewer  DatabaseViewer
 	checker access.Checker
@@ -42,11 +41,11 @@ type DatabaseHandler struct {
 	tmpl    *templates.Set
 }
 
-func NewDatabaseHandler(reg DatabaseRegistry, viewer DatabaseViewer, checker access.Checker, test ConnTester, tmpl *templates.Set) *DatabaseHandler {
+func NewHandler(reg DatabaseRegistry, viewer DatabaseViewer, checker access.Checker, test ConnTester, tmpl *templates.Set) *Handler {
 	if test == nil {
-		test = dbmanager.TestConnection
+		test = TestConnection
 	}
-	return &DatabaseHandler{reg: reg, viewer: viewer, checker: checker, test: test, tmpl: tmpl}
+	return &Handler{reg: reg, viewer: viewer, checker: checker, test: test, tmpl: tmpl}
 }
 
 type dbForm struct {
@@ -54,14 +53,14 @@ type dbForm struct {
 	Port                                int
 }
 
-func (f dbForm) input(password string) dbmanager.DatabaseInput {
-	return dbmanager.DatabaseInput{
+func (f dbForm) input(password string) DatabaseInput {
+	return DatabaseInput{
 		Name: f.Name, Host: f.Host, Port: f.Port, DBName: f.DBName,
 		DBUser: f.DBUser, Password: password, SSLMode: f.SSLMode,
 	}
 }
 
-func formFromDatabase(d dbmanager.Database) dbForm {
+func formFromDatabase(d Database) dbForm {
 	return dbForm{Name: d.Name, Host: d.Host, Port: d.Port, DBName: d.DBName, DBUser: d.DBUser, SSLMode: d.SSLMode}
 }
 
@@ -79,13 +78,13 @@ func readDBForm(r *http.Request) dbForm {
 
 type databasesView struct {
 	notice
-	Databases []dbmanager.Database
+	Databases []Database
 	Form      dbForm
 }
 
 type databaseEditView struct {
 	notice
-	Database dbmanager.Database
+	Database Database
 	Form     dbForm
 }
 
@@ -138,8 +137,8 @@ type tableView struct {
 	Table        string
 	Tab          string
 	Tabs         []tabLink
-	Info         dbmanager.TableInfo
-	Data         dbmanager.DataPage
+	Info         TableInfo
+	Data         DataPage
 	PrevURL      string
 	NextURL      string
 }
@@ -150,8 +149,8 @@ type errorView struct {
 	BackURL string
 }
 
-func (h *DatabaseHandler) fail(w http.ResponseWriter, op string, err error) {
-	if errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+func (h *Handler) fail(w http.ResponseWriter, op string, err error) {
+	if errors.Is(err, ErrDatabaseNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -161,26 +160,26 @@ func (h *DatabaseHandler) fail(w http.ResponseWriter, op string, err error) {
 
 func inputMessage(err error) (string, bool) {
 	switch {
-	case errors.Is(err, dbmanager.ErrNameTaken):
+	case errors.Is(err, ErrNameTaken):
 		return "A database with that name already exists.", true
-	case errors.Is(err, dbmanager.ErrInvalidInput):
-		return strings.TrimPrefix(err.Error(), dbmanager.ErrInvalidInput.Error()+": "), true
+	case errors.Is(err, ErrInvalidInput):
+		return strings.TrimPrefix(err.Error(), ErrInvalidInput.Error()+": "), true
 	}
 	return "", false
 }
 
 func connMessage(err error) (string, bool) {
-	var ce *dbmanager.ConnError
+	var ce *ConnError
 	if errors.As(err, &ce) {
 		return "Could not connect: " + ce.Reason + ".", true
 	}
-	if errors.Is(err, dbmanager.ErrConnectionFailed) {
+	if errors.Is(err, ErrConnectionFailed) {
 		return "Could not connect to the database.", true
 	}
 	return "", false
 }
 
-func (h *DatabaseHandler) renderDatabases(w http.ResponseWriter, r *http.Request, n notice, form dbForm) {
+func (h *Handler) renderDatabases(w http.ResponseWriter, r *http.Request, n notice, form dbForm) {
 	list, err := h.reg.List(r.Context())
 	if err != nil {
 		h.fail(w, "list", err)
@@ -189,7 +188,7 @@ func (h *DatabaseHandler) renderDatabases(w http.ResponseWriter, r *http.Request
 	h.tmpl.Fragment(w, http.StatusOK, "admin/databases", "databases", databasesView{notice: n, Databases: list, Form: form})
 }
 
-func (h *DatabaseHandler) AdminListPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminListPage(w http.ResponseWriter, r *http.Request) {
 	list, err := h.reg.List(r.Context())
 	if err != nil {
 		h.fail(w, "list", err)
@@ -198,7 +197,7 @@ func (h *DatabaseHandler) AdminListPage(w http.ResponseWriter, r *http.Request) 
 	h.tmpl.Page(w, r, http.StatusOK, "admin/databases", "Databases", databasesView{Databases: list, Form: dbForm{Port: 5432, SSLMode: "prefer"}})
 }
 
-func (h *DatabaseHandler) AdminCreate(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -216,7 +215,7 @@ func (h *DatabaseHandler) AdminCreate(w http.ResponseWriter, r *http.Request) {
 	h.fail(w, "create", err)
 }
 
-func (h *DatabaseHandler) AdminTestNew(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminTestNew(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -229,7 +228,7 @@ func (h *DatabaseHandler) AdminTestNew(w http.ResponseWriter, r *http.Request) {
 	h.renderConnResult(w, "test new", err)
 }
 
-func (h *DatabaseHandler) renderConnResult(w http.ResponseWriter, op string, err error) {
+func (h *Handler) renderConnResult(w http.ResponseWriter, op string, err error) {
 	res := connResult{OK: true, Message: "Connection successful."}
 	if err != nil {
 		if msg, ok := inputMessage(err); ok {
@@ -244,7 +243,7 @@ func (h *DatabaseHandler) renderConnResult(w http.ResponseWriter, op string, err
 	h.tmpl.Fragment(w, http.StatusOK, "admin/database", "conn_result", res)
 }
 
-func (h *DatabaseHandler) AdminEditPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminEditPage(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -258,7 +257,7 @@ func (h *DatabaseHandler) AdminEditPage(w http.ResponseWriter, r *http.Request) 
 	h.tmpl.Page(w, r, http.StatusOK, "admin/database", "Edit database", databaseEditView{Database: d, Form: formFromDatabase(d)})
 }
 
-func (h *DatabaseHandler) AdminUpdate(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminUpdate(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -292,7 +291,7 @@ func (h *DatabaseHandler) AdminUpdate(w http.ResponseWriter, r *http.Request) {
 	h.tmpl.Fragment(w, http.StatusOK, "admin/database", "database_form", databaseEditView{notice: n, Database: d, Form: formFromDatabase(d)})
 }
 
-func (h *DatabaseHandler) AdminTestSaved(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminTestSaved(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -304,17 +303,17 @@ func (h *DatabaseHandler) AdminTestSaved(w http.ResponseWriter, r *http.Request)
 	pool, err := h.reg.Pool(ctx, id)
 	if err == nil {
 		if perr := pool.Ping(ctx); perr != nil {
-			err = &dbmanager.ConnError{Reason: "server tidak dapat dihubungi"}
+			err = &ConnError{Reason: "server tidak dapat dihubungi"}
 		}
 	}
-	if errors.Is(err, dbmanager.ErrDatabaseNotFound) {
+	if errors.Is(err, ErrDatabaseNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	h.renderConnResult(w, "test saved", err)
 }
 
-func (h *DatabaseHandler) AdminDelete(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) AdminDelete(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r, "id")
 	if !ok {
 		http.NotFound(w, r)
@@ -327,7 +326,7 @@ func (h *DatabaseHandler) AdminDelete(w http.ResponseWriter, r *http.Request) {
 	h.renderDatabases(w, r, notice{Message: "Database removed. Its group grants and migration history were removed too."}, dbForm{Port: 5432, SSLMode: "prefer"})
 }
 
-func (h *DatabaseHandler) SelectPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) SelectPage(w http.ResponseWriter, r *http.Request) {
 	user, ok := access.UserFromContext(r.Context())
 	if !ok {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
@@ -363,7 +362,7 @@ func tableURL(dbID int64, schema, table, tab string, page int) string {
 	return "/databases/" + strconv.FormatInt(dbID, 10) + "/table?" + q.Encode()
 }
 
-func groupTables(dbID int64, tables []dbmanager.Table, activeSchema, activeTable string) []schemaGroup {
+func groupTables(dbID int64, tables []Table, activeSchema, activeTable string) []schemaGroup {
 	var groups []schemaGroup
 	for _, t := range tables {
 		if len(groups) == 0 || groups[len(groups)-1].Name != t.Schema {
@@ -379,36 +378,36 @@ func groupTables(dbID int64, tables []dbmanager.Table, activeSchema, activeTable
 	return groups
 }
 
-func (h *DatabaseHandler) viewerContext(w http.ResponseWriter, r *http.Request) (dbmanager.Database, access.Level, bool) {
+func (h *Handler) viewerContext(w http.ResponseWriter, r *http.Request) (Database, access.Level, bool) {
 	id, ok := pathID(r, access.DatabaseIDParam)
 	if !ok {
 		http.NotFound(w, r)
-		return dbmanager.Database{}, access.LevelNone, false
+		return Database{}, access.LevelNone, false
 	}
 	user, _ := access.UserFromContext(r.Context())
 	level, err := h.checker.EffectiveLevel(r.Context(), user.ID, id)
 	if err != nil {
 		h.fail(w, "effective level", err)
-		return dbmanager.Database{}, access.LevelNone, false
+		return Database{}, access.LevelNone, false
 	}
 	if level == access.LevelNone {
 		http.NotFound(w, r)
-		return dbmanager.Database{}, access.LevelNone, false
+		return Database{}, access.LevelNone, false
 	}
 	d, err := h.reg.Get(r.Context(), id)
 	if err != nil {
 		h.fail(w, "get", err)
-		return dbmanager.Database{}, access.LevelNone, false
+		return Database{}, access.LevelNone, false
 	}
 	return d, level, true
 }
 
-func (h *DatabaseHandler) viewerFailure(w http.ResponseWriter, r *http.Request, d dbmanager.Database, op string, err error) {
+func (h *Handler) viewerFailure(w http.ResponseWriter, r *http.Request, d Database, op string, err error) {
 	back := "/databases/" + strconv.FormatInt(d.ID, 10)
 	switch {
-	case errors.Is(err, dbmanager.ErrDatabaseNotFound), errors.Is(err, dbmanager.ErrTableNotFound):
+	case errors.Is(err, ErrDatabaseNotFound), errors.Is(err, ErrTableNotFound):
 		http.NotFound(w, r)
-	case errors.Is(err, dbmanager.ErrConnectionFailed):
+	case errors.Is(err, ErrConnectionFailed):
 		msg, _ := connMessage(err)
 		log.Printf("databases: %s (db %d): %v", op, d.ID, err)
 		h.tmpl.Page(w, r, http.StatusBadGateway, "db/error", "Connection failed", errorView{
@@ -426,7 +425,7 @@ func (h *DatabaseHandler) viewerFailure(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (h *DatabaseHandler) TablesPage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) TablesPage(w http.ResponseWriter, r *http.Request) {
 	d, level, ok := h.viewerContext(w, r)
 	if !ok {
 		return
@@ -446,7 +445,7 @@ var tabOrder = []struct{ Key, Label string }{
 	{"columns", "Columns"}, {"constraints", "Constraints"}, {"indexes", "Indexes"}, {"data", "Data"},
 }
 
-func (h *DatabaseHandler) TablePage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) TablePage(w http.ResponseWriter, r *http.Request) {
 	d, level, ok := h.viewerContext(w, r)
 	if !ok {
 		return
@@ -508,4 +507,14 @@ func (h *DatabaseHandler) TablePage(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	h.tmpl.Page(w, r, http.StatusOK, "db/table", schema+"."+table, view)
+}
+
+type notice struct {
+	Message string
+	Error   string
+}
+
+func pathID(r *http.Request, name string) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
+	return id, err == nil && id > 0
 }

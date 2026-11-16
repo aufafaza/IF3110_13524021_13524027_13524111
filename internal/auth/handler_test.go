@@ -1,4 +1,4 @@
-package handlers_test
+package auth_test
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 )
 
 const cookieName = "sid"
@@ -49,9 +48,9 @@ func (f *fakeSessions) Logout(_ context.Context, raw string) error {
 	return f.logoutErr
 }
 
-func newHandler(a *fakeAuth, s *fakeSessions) *handlers.AuthHandler {
+func newHandler(a *fakeAuth, s *fakeSessions) *auth.Handler {
 	cfg := session.CookieConfig{Name: cookieName, Secure: true, SameSite: http.SameSiteLaxMode}
-	return handlers.NewAuthHandler(a, s, cfg)
+	return auth.NewHandler(a, s, cfg)
 }
 
 func postForm(path string, form url.Values) *http.Request {

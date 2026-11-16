@@ -10,12 +10,12 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/admin"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/config"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/dbmanager"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/handlers"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/templates"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/migrations"
@@ -59,12 +59,12 @@ func main() {
 		Domain:   cfg.Session.Domain,
 	}
 
-	cipher, err := dbmanager.NewCipher(cfg.EncryptionKey)
+	cipher, err := database.NewCipher(cfg.EncryptionKey)
 	if err != nil {
 		log.Fatalf("dbmanager: %v", err)
 	}
 
-	registry := dbmanager.NewRegistry(pool, cipher)
+	registry := database.NewRegistry(pool, cipher)
 	defer registry.Close()
 
 	tmpl, err := templates.New()
@@ -85,12 +85,12 @@ func main() {
 	migrationService := migration.NewService(migrationRepo, migrationRunner, migration.AdaptChecker(checker))
 
 	handler := web.New(web.Deps{
-		Auth:         handlers.NewAuthHandler(authService, sessions, cookie),
-		Home:         handlers.NewHomeHandler(tmpl),
-		Admin:        handlers.NewAdminHandler(adminService, tmpl),
+		Auth:         auth.NewHandler(authService, sessions, cookie),
+		Home:         home.NewHandler(tmpl),
+		Admin:        admin.NewHandler(adminService, tmpl),
 		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
 		Guard:        access.NewGuard(checker, "/login"),
-		Databases:    handlers.NewDatabaseHandler(registry, dbmanager.NewViewer(registry), checker, nil, tmpl),
+		Databases:    database.NewHandler(registry, database.NewViewer(registry), checker, nil, tmpl),
 		Migrations:   migration.NewHandler(migrationService),
 	})
 
