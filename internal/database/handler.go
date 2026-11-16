@@ -36,12 +36,12 @@ type ConnTester func(ctx context.Context, in DatabaseInput) error
 type Handler struct {
 	reg     DatabaseRegistry
 	viewer  DatabaseViewer
-	checker access.Checker
+	checker access.DatabaseChecker
 	test    ConnTester
 	tmpl    *templates.Set
 }
 
-func NewHandler(reg DatabaseRegistry, viewer DatabaseViewer, checker access.Checker, test ConnTester, tmpl *templates.Set) *Handler {
+func NewHandler(reg DatabaseRegistry, viewer DatabaseViewer, checker access.DatabaseChecker, test ConnTester, tmpl *templates.Set) *Handler {
 	if test == nil {
 		test = TestConnection
 	}
