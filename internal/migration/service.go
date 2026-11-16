@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 )
 
 var ErrAnalyzerUnavailable = errors.New("migration: execution plan analyzer is not configured")
@@ -19,11 +21,11 @@ type PreviewResult struct {
 type Service struct {
 	repo     Repository
 	runner   *Runner
-	checker  AccessChecker
+	checker  access.DatabaseChecker
 	analyzer PlanAnalyzer
 }
 
-func NewService(repo Repository, runner *Runner, checker AccessChecker) *Service {
+func NewService(repo Repository, runner *Runner, checker access.DatabaseChecker) *Service {
 	var analyzer PlanAnalyzer
 	if runner != nil && runner.executor != nil {
 		if pa, ok := runner.executor.(PlanAnalyzer); ok {
@@ -38,25 +40,20 @@ func NewService(repo Repository, runner *Runner, checker AccessChecker) *Service
 	}
 }
 
-func (s *Service) WithPlanAnalyzer(analyzer PlanAnalyzer) *Service {
-	s.analyzer = analyzer
-	return s
-}
-
-func (s *Service) UserLevel(ctx context.Context, userID, databaseID int64) (AccessLevel, error) {
+func (s *Service) UserLevel(ctx context.Context, userID, databaseID int64) (access.Level, error) {
 	if userID <= 0 {
-		return LevelNone, ErrUnauthenticated
+		return access.LevelNone, ErrUnauthenticated
 	}
 	if s.checker == nil {
-		return LevelNone, ErrForbidden
+		return access.LevelNone, ErrForbidden
 	}
 	return s.checker.EffectiveLevel(ctx, userID, databaseID)
 }
 
-func (s *Service) requireLevel(ctx context.Context, userID, databaseID int64, min AccessLevel) (AccessLevel, error) {
+func (s *Service) requireLevel(ctx context.Context, userID, databaseID int64, min access.Level) (access.Level, error) {
 	lvl, err := s.UserLevel(ctx, userID, databaseID)
 	if err != nil {
-		return LevelNone, err
+		return access.LevelNone, err
 	}
 	if lvl < min {
 		return lvl, ErrForbidden
@@ -65,7 +62,7 @@ func (s *Service) requireLevel(ctx context.Context, userID, databaseID int64, mi
 }
 
 func (s *Service) CreateDraft(ctx context.Context, userID, databaseID int64, title, sql string) (Migration, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelEdit); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Migration{}, err
 	}
 	title = strings.TrimSpace(title)
@@ -85,7 +82,7 @@ func (s *Service) CreateDraft(ctx context.Context, userID, databaseID int64, tit
 }
 
 func (s *Service) UpdateDraft(ctx context.Context, userID, databaseID, migrationID int64, title, sql string) (Migration, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelEdit); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Migration{}, err
 	}
 	title = strings.TrimSpace(title)
@@ -105,7 +102,7 @@ func (s *Service) UpdateDraft(ctx context.Context, userID, databaseID, migration
 }
 
 func (s *Service) PreviewSQL(ctx context.Context, userID, databaseID int64, title, sql string) (PreviewResult, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelEdit); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return PreviewResult{}, err
 	}
 	title = strings.TrimSpace(title)
@@ -132,7 +129,7 @@ func (s *Service) PreviewSQL(ctx context.Context, userID, databaseID int64, titl
 }
 
 func (s *Service) AnalyzeSQL(ctx context.Context, userID, databaseID int64, title, sql string, analyze bool) (PreviewResult, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelEdit); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return PreviewResult{}, err
 	}
 	title = strings.TrimSpace(title)
@@ -162,7 +159,7 @@ func (s *Service) AnalyzeSQL(ctx context.Context, userID, databaseID int64, titl
 }
 
 func (s *Service) ExplainMigration(ctx context.Context, userID, databaseID, migrationID int64, analyze bool) (ExecutionPlanReport, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelEdit); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return ExecutionPlanReport{}, err
 	}
 	if s.analyzer == nil {
@@ -176,7 +173,7 @@ func (s *Service) ExplainMigration(ctx context.Context, userID, databaseID, migr
 }
 
 func (s *Service) Execute(ctx context.Context, userID, databaseID, migrationID int64) (Migration, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelEdit); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Migration{}, err
 	}
 	return s.runner.Run(ctx, userID, databaseID, migrationID)
@@ -191,14 +188,14 @@ func (s *Service) CreateAndExecute(ctx context.Context, userID, databaseID int64
 }
 
 func (s *Service) ListHistory(ctx context.Context, userID, databaseID int64) ([]Migration, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelView); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelView); err != nil {
 		return nil, err
 	}
 	return s.repo.ListByDatabase(ctx, databaseID)
 }
 
 func (s *Service) GetDetail(ctx context.Context, userID, databaseID, migrationID int64) (Migration, error) {
-	if _, err := s.requireLevel(ctx, userID, databaseID, LevelView); err != nil {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelView); err != nil {
 		return Migration{}, err
 	}
 	return s.repo.GetByID(ctx, databaseID, migrationID)

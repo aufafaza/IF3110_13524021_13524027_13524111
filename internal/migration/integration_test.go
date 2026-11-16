@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/testutil"
 )
@@ -61,7 +62,7 @@ func setupIntegrationEnv(t *testing.T) *integrationEnv {
 	repo := migration.NewPostgresRepository(platformPool)
 	locker := migration.NewTargetPostgresLocker(provider)
 	executor := migration.NewTargetPostgresExecutor(provider)
-	checker := migration.NewPostgresAccessChecker(platformPool)
+	checker := access.NewPostgresChecker(platformPool)
 	runner := migration.NewRunner(repo, locker, executor)
 	svc := migration.NewService(repo, runner, checker)
 
@@ -334,4 +335,3 @@ func TestIntegrationExplainAndExplainAnalyzeRollback(t *testing.T) {
 		t.Fatal("departments table exists after EXPLAIN ANALYZE; sandbox transaction was not rolled back!")
 	}
 }
-
