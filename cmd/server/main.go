@@ -82,7 +82,7 @@ func main() {
 		migration.NewTargetPostgresLocker(registry),
 		migration.NewTargetPostgresExecutor(registry),
 	)
-	migrationService := migration.NewService(migrationRepo, migrationRunner, migration.AdaptChecker(checker))
+	migrationService := migration.NewService(migrationRepo, migrationRunner, checker)
 
 	handler := web.New(web.Deps{
 		Auth:         auth.NewHandler(authService, sessions, cookie),
