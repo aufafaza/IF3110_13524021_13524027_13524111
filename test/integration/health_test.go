@@ -19,7 +19,7 @@ func TestHealthOverHTTP(t *testing.T) {
 	srv := httptest.NewServer(web.New(web.Deps{
 		Auth:         auth.NewHandler(nil, nil, cookie),
 		Authenticate: middleware.NewAuthenticator(nil, nil, cookie),
-		Guard:        access.NewGuard(nil, "/login"),
+		Guard:        access.NewGuard(nil),
 	}))
 	defer srv.Close()
 
