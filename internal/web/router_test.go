@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -97,7 +98,7 @@ func newRig(t *testing.T, sessions *fakeSessions, isAdmin bool) testRig {
 		Home:         home.NewHandler(tmpl),
 		Admin:        admin.NewHandler(adminSvc, tmpl),
 		Authenticate: middleware.NewAuthenticator(sessions, fakeUsers{admin: isAdmin}, cookie),
-		Guard:        access.NewGuard(nil, "/login"),
+		Guard:        access.NewGuard(nil),
 	})
 	return testRig{handler: h, sessions: sessions, admin: adminSvc}
 }
@@ -147,16 +148,10 @@ func TestStaticAssets(t *testing.T) {
 	}
 }
 
-func TestHome_AnonymousRedirectsToLogin(t *testing.T) {
+func TestHome_AnonymousGetsJSONUnauthorized(t *testing.T) {
 	rec := httptest.NewRecorder()
 	newTestRouter(t, &fakeSessions{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
-	}
-	if loc := rec.Header().Get("Location"); loc != "/login" {
-		t.Errorf("Location = %q, want /login", loc)
-	}
+	assertJSONAccessError(t, rec, http.StatusUnauthorized, "unauthenticated")
 }
 
 func TestHome_LoggedIn(t *testing.T) {
@@ -284,33 +279,26 @@ func TestPostLogin_WithMatchingCSRFCookieSucceeds(t *testing.T) {
 
 var adminPages = []string{"/admin/users", "/admin/groups", "/admin/groups/1"}
 
-func TestAdminPages_AnonymousRedirectToLogin(t *testing.T) {
+func TestAdminPages_AnonymousGetsJSONUnauthorized(t *testing.T) {
 	h := newRig(t, &fakeSessions{}, false).handler
 	for _, path := range adminPages {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
-			if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
-				t.Errorf("status = %d, Location = %q; want 303 /login", rec.Code, rec.Header().Get("Location"))
-			}
+			assertJSONAccessError(t, rec, http.StatusUnauthorized, "unauthenticated")
 		})
 	}
 }
 
-func TestAdminPages_HTMXRequestFromExpiredSessionRedirectsTheWholePage(t *testing.T) {
+func TestAdminPages_HTMXRequestFromExpiredSessionGetsJSONUnauthorized(t *testing.T) {
 	h := newRig(t, &fakeSessions{}, false).handler
 	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
 	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Header().Get("HX-Redirect") != "/login" {
-		t.Errorf("HX-Redirect = %q, want /login", rec.Header().Get("HX-Redirect"))
-	}
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rec.Code)
-	}
+	assertJSONAccessError(t, rec, http.StatusUnauthorized, "unauthenticated")
 }
 
 func TestAdminPages_NonAdminIsForbidden(t *testing.T) {
@@ -453,5 +441,29 @@ func TestStatic_ServedWithoutLogin(t *testing.T) {
 	newTestRouter(t, &fakeSessions{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/app.css", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func assertJSONAccessError(t *testing.T, rec *httptest.ResponseRecorder, status int, message string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Errorf("status = %d, want %d; body: %s", rec.Code, status, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	for _, header := range []string{"Location", "HX-Redirect"} {
+		if value := rec.Header().Get(header); value != "" {
+			t.Errorf("unexpected %s: %q", header, value)
+		}
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid JSON error: %v", err)
+	}
+	if payload.Error != message {
+		t.Errorf("error = %q, want %q", payload.Error, message)
 	}
 }

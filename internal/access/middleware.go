@@ -13,23 +13,15 @@ type Guard struct {
 	loginPath string
 }
 
-func NewGuard(checker Checker, loginPath string) *Guard {
-	return &Guard{checker: checker, loginPath: loginPath}
-}
-
-func (g *Guard) toLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("HX-Request") == "true" {
-		w.Header().Set("HX-Redirect", g.loginPath)
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
-		return
-	}
-	http.Redirect(w, r, g.loginPath, http.StatusSeeOther)
+func NewGuard(checker Checker) *Guard {
+	return &Guard{checker: checker, loginPath: "/login"}
 }
 
 func (g *Guard) RequireLogin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := UserFromContext(r.Context()); !ok {
-			g.toLogin(w, r)
+			// return json error
+			WriteAPIError(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -40,11 +32,13 @@ func (g *Guard) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := UserFromContext(r.Context())
 		if !ok {
-			g.toLogin(w, r)
+			// return json error
+			WriteAPIError(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
 		if !user.IsPlatformAdmin {
-			http.Error(w, "forbidden", http.StatusForbidden)
+
+			WriteAPIError(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -56,28 +50,33 @@ func (g *Guard) RequireDBAccess(min Level) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user, ok := UserFromContext(r.Context())
 			if !ok {
-				g.toLogin(w, r)
+				// return json
+
+				WriteAPIError(w, "unauthenticated", http.StatusUnauthorized)
 				return
 			}
 
 			dbID, err := strconv.ParseInt(r.PathValue(DatabaseIDParam), 10, 64)
 			if err != nil {
-				http.NotFound(w, r)
+
+				WriteAPIError(w, "not found", http.StatusNotFound)
 				return
 			}
 
 			level, err := g.checker.EffectiveLevel(r.Context(), user.ID, dbID)
 			if err != nil {
 				log.Printf("access: effective level: %v", err)
-				http.Error(w, "internal error", http.StatusInternalServerError)
+
+				WriteAPIError(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 
 			switch {
 			case level == LevelNone:
-				http.NotFound(w, r)
+
+				WriteAPIError(w, "not found", http.StatusNotFound)
 			case level < min:
-				http.Error(w, "forbidden", http.StatusForbidden)
+				WriteAPIError(w, "forbidden", http.StatusForbidden)
 			default:
 				next.ServeHTTP(w, r)
 			}
