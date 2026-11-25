@@ -36,6 +36,10 @@ type Migration struct {
 	Title              string     `json:"title"`
 	SQL                string     `json:"sql"`
 	Status             Status     `json:"status"`
+	DownSQL            *string    `json:"down_sql,omitempty"`
+	IrreversibleReason *string    `json:"irreversible_reason,omitempty"`
+	Revision           int        `json:"revision"`
+	FirstExecutedAt    *time.Time `json:"first_executed_at,omitempty"`
 	CreatedBy          int64      `json:"created_by"`
 	CreatedByUsername  string     `json:"created_by_username,omitempty"`
 	ExecutedBy         *int64     `json:"executed_by,omitempty"`
@@ -57,4 +61,9 @@ var (
 	ErrInvalidTransition   = errors.New("migration: invalid status transition")
 	ErrVersionConflict     = errors.New("migration: version conflict")
 	ErrConfirmationMissing = errors.New("migration: execution confirmation is required")
+	ErrNotLatestActive     = errors.New("migration: only the latest active migration can be rolled back")
+	ErrIrreversible        = errors.New("migration: migration is irreversible")
+	ErrImmutable           = errors.New("migration: definition is immutable after first execution")
+	ErrNothingToForward    = errors.New("migration: nothing to forward in linear order")
+	ErrInvalidDefinition   = errors.New("migration: provide either down SQL or an irreversible reason")
 )
