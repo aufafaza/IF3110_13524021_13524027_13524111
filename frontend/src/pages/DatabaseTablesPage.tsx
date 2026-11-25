@@ -44,13 +44,24 @@ function DatabaseTablesList({ dbID }: { dbID: string }) {
   return (
     <>
       <h1>Tables for {result.database.name}</h1>
+      <nav className="table-nav" aria-label="Database views">
+        <Link to={`/databases/${dbID}/migrations`}>Migrations</Link>
+      </nav>
       {result.tables.length === 0 ? <p className="feedback">No tables available.</p> : (
         <ul className="resource-list" role="list">
-          {result.tables.map((table) => (
-            <li className="resource-row" key={JSON.stringify([table.schema, table.name])}>
-              {table.schema}.{table.name}
-            </li>
-          ))}
+          {result.tables.map((table) => {
+            const query = new URLSearchParams({
+              schema: table.schema,
+              table: table.name,
+            })
+            return (
+              <li key={JSON.stringify([table.schema, table.name])}>
+                <Link className="resource-link" to={`/databases/${dbID}/table?${query}`}>
+                  {table.schema}.{table.name}
+                </Link>
+              </li>
+            )
+          })}
         </ul>
       )}
     </>
