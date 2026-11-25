@@ -94,9 +94,9 @@ type connResult struct {
 }
 
 type accessibleDB struct {
-	ID    int64
-	Name  string
-	Level access.Level
+	ID    int64        `json:"id"`
+	Name  string       `json:"name"`
+	Level access.Level `json:"-"`
 }
 
 type selectView struct {
@@ -332,23 +332,30 @@ func (h *Handler) SelectPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	all, err := h.reg.List(r.Context())
+	out, err := h.accessibleDatabases(r.Context(), user.ID)
 	if err != nil {
 		h.fail(w, "list", err)
 		return
 	}
-	var out []accessibleDB
+	h.tmpl.Page(w, r, http.StatusOK, "db/select", "Select database", selectView{Databases: out})
+}
+
+func (h *Handler) accessibleDatabases(ctx context.Context, userID int64) ([]accessibleDB, error) {
+	all, err := h.reg.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]accessibleDB, 0)
 	for _, d := range all {
-		level, err := h.checker.EffectiveLevel(r.Context(), user.ID, d.ID)
+		level, err := h.checker.EffectiveLevel(ctx, userID, d.ID)
 		if err != nil {
-			h.fail(w, "effective level", err)
-			return
+			return nil, err
 		}
 		if level > access.LevelNone {
 			out = append(out, accessibleDB{ID: d.ID, Name: d.Name, Level: level})
 		}
 	}
-	h.tmpl.Page(w, r, http.StatusOK, "db/select", "Select database", selectView{Databases: out})
+	return out, nil
 }
 
 func tableURL(dbID int64, schema, table, tab string, page int) string {
