@@ -15,6 +15,8 @@ type CreateDraftParams struct {
 	DatabaseID int64
 	Title      string
 	SQL        string
+	DownSQL            *string
+	IrreversibleReason *string
 	CreatedBy  int64
 }
 
@@ -23,6 +25,8 @@ type UpdateDraftParams struct {
 	DatabaseID int64
 	Title      string
 	SQL        string
+	DownSQL            *string
+	IrreversibleReason *string
 }
 
 type RecordExecutionParams struct {
@@ -58,6 +62,10 @@ const selectMigrationColumns = `
 	m.version,
 	m.title,
 	m.sql,
+	m.down_sql,
+	m.irreversible_reason,
+	m.revision,
+	m.first_executed_at,
 	m.status,
 	m.created_by,
 	COALESCE(creator.username, ''),
@@ -83,6 +91,10 @@ func scanMigration(row pgx.Row) (Migration, error) {
 		&m.Version,
 		&m.Title,
 		&m.SQL,
+		&m.DownSQL,
+		&m.IrreversibleReason,
+		&m.Revision,
+		&m.FirstExecutedAt,
 		&statusStr,
 		&m.CreatedBy,
 		&m.CreatedByUsername,
@@ -101,11 +113,16 @@ func scanMigration(row pgx.Row) (Migration, error) {
 
 func (r *PostgresRepository) CreateDraft(ctx context.Context, params CreateDraftParams) (Migration, error) {
 	var id int64
+	down, reason := params.DownSQL, params.IrreversibleReason
+	if down == nil && reason == nil {
+		noDown := "No down SQL provided"
+		reason = &noDown
+	}
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO migrations (database_id, title, sql, status, created_by)
-		 VALUES ($1, $2, $3, 'draft', $4)
+		`INSERT INTO migrations (database_id, title, sql, down_sql, irreversible_reason, status, created_by)
+		 VALUES ($1, $2, $3, $4, $5, 'draft', $6)
 		 RETURNING id`,
-		params.DatabaseID, params.Title, params.SQL, params.CreatedBy,
+		params.DatabaseID, params.Title, params.SQL, down, reason, params.CreatedBy,
 	).Scan(&id)
 	if err != nil {
 		return Migration{}, fmt.Errorf("migration: create draft: %w", err)
@@ -117,10 +134,15 @@ func (r *PostgresRepository) UpdateDraft(ctx context.Context, params UpdateDraft
 	var id int64
 	err := r.pool.QueryRow(ctx,
 		`UPDATE migrations
-		 SET title = $1, sql = $2
-		 WHERE id = $3 AND database_id = $4 AND status = 'draft'
+		 SET title = $1, sql = $2,
+		     down_sql = CASE WHEN $3::text IS NULL AND $4::text IS NULL
+		                     THEN down_sql ELSE $3::text END,
+		     irreversible_reason = CASE WHEN $3::text IS NULL AND $4::text IS NULL
+		                                THEN irreversible_reason ELSE $4::text END,
+		     revision = revision + 1
+		 WHERE id = $5 AND database_id = $6 AND status = 'draft'
 		 RETURNING id`,
-		params.Title, params.SQL, params.ID, params.DatabaseID,
+		params.Title, params.SQL, params.DownSQL, params.IrreversibleReason, params.ID, params.DatabaseID,
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Migration{}, r.classifyNonDraftError(ctx, params.DatabaseID, params.ID)
@@ -240,3 +262,83 @@ func (r *PostgresRepository) classifyNonDraftError(ctx context.Context, database
 	}
 	return ErrNotDraft
 }
+
+// AttemptResult: stub kontrak dengan PIC 1 (satu baris per attempt).
+type AttemptResult struct {
+	DatabaseID            int64
+	MigrationID           int64
+	Revision              int
+	ExecutionID           string
+	AttemptID             string
+	Operation             Operation
+	Status                AttemptStatus
+	ActorID               int64
+	ExecutedSQL           string
+	ErrorMessage          *string
+	RollbackOfExecutionID *string
+	At                    time.Time
+}
+
+type HistoryRepository interface {
+	// Idempoten: redelivery (execution_id, attempt_id sama) tidak menambah baris.
+	AppendHistory(ctx context.Context, r AttemptResult) (entry HistoryEntry, created bool, err error)
+	ListHistoryEntries(ctx context.Context, databaseID int64) ([]HistoryEntry, error)
+}
+
+const historyColumns = `id, database_id, migration_id, revision, execution_id, attempt_id,
+	operation, status, actor_id, executed_sql, error_message, rollback_of_execution_id, created_at`
+
+func scanHistory(row pgx.Row) (HistoryEntry, error) {
+	var e HistoryEntry
+	var op, st string
+	err := row.Scan(&e.ID, &e.DatabaseID, &e.MigrationID, &e.Revision, &e.ExecutionID, &e.AttemptID,
+		&op, &st, &e.ActorID, &e.ExecutedSQL, &e.ErrorMessage, &e.RollbackOfExecutionID, &e.CreatedAt)
+	e.Operation, e.Status = Operation(op), AttemptStatus(st)
+	return e, err
+}
+
+func (r *PostgresRepository) AppendHistory(ctx context.Context, a AttemptResult) (HistoryEntry, bool, error) {
+	e, err := scanHistory(r.pool.QueryRow(ctx,
+		`INSERT INTO migration_history
+		   (database_id, migration_id, revision, execution_id, attempt_id, operation, status,
+		    actor_id, executed_sql, error_message, rollback_of_execution_id, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		 ON CONFLICT (execution_id, attempt_id) DO NOTHING
+		 RETURNING `+historyColumns,
+		a.DatabaseID, a.MigrationID, a.Revision, a.ExecutionID, a.AttemptID,
+		string(a.Operation), string(a.Status), a.ActorID, a.ExecutedSQL,
+		a.ErrorMessage, a.RollbackOfExecutionID, a.At))
+	if err == nil {
+		return e, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return HistoryEntry{}, false, fmt.Errorf("migration: append history: %w", err)
+	}
+	e, err = scanHistory(r.pool.QueryRow(ctx,
+		`SELECT `+historyColumns+` FROM migration_history WHERE execution_id = $1 AND attempt_id = $2`,
+		a.ExecutionID, a.AttemptID))
+	if err != nil {
+		return HistoryEntry{}, false, fmt.Errorf("migration: load existing attempt: %w", err)
+	}
+	return e, false, nil
+}
+
+func (r *PostgresRepository) ListHistoryEntries(ctx context.Context, databaseID int64) ([]HistoryEntry, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+historyColumns+` FROM migration_history WHERE database_id = $1 ORDER BY id`, databaseID)
+	if err != nil {
+		return nil, fmt.Errorf("migration: list history: %w", err)
+	}
+	defer rows.Close()
+	out := []HistoryEntry{}
+	for rows.Next() {
+		e, err := scanHistory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("migration: scan history: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+var _ HistoryRepository = (*PostgresRepository)(nil)
