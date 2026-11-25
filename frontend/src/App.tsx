@@ -3,7 +3,7 @@ import { RequireAuth } from '@/auth/RequireAuth'
 import { AppLayout } from '@/layout/AppLayout'
 import { DatabaseListPage } from '@/pages/DatabaseListPage'
 import { LoginPage } from '@/pages/LoginPage'
-
+import { DatabaseTablesPage } from './pages/DatabaseTablesPage'
 export default function App() {
   return (
     <Routes>
@@ -12,6 +12,7 @@ export default function App() {
       <Route element={<RequireAuth />}>
         <Route element={<AppLayout />}>
           <Route path="/databases" element={<DatabaseListPage />} />
+          <Route path="/databases/:dbID" element={<DatabaseTablesPage />} />
         </Route>
       </Route>
       <Route path="*" element={<h1>Page not found</h1>} />
