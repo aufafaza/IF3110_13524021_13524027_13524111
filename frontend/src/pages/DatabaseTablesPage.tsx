@@ -8,7 +8,7 @@ export function DatabaseTablesPage() {
 
   return (
     <>
-      <Link to="/databases">Back to databases</Link>
+      <Link className="back-link" to="/databases">Back to databases</Link>
       {dbID ? <DatabaseTablesList key={dbID} dbID={dbID} /> : <h1>Database not found</h1>}
     </>
   )
@@ -38,16 +38,18 @@ function DatabaseTablesList({ dbID }: { dbID: string }) {
     return () => controller.abort()
   }, [dbID])
 
-  if (error) return <p role="alert">{error}</p>
-  if (!result) return <p role="status">Loading tables…</p>
+  if (error) return <p className="feedback feedback-error" role="alert">{error}</p>
+  if (!result) return <p className="feedback" role="status">Loading tables…</p>
 
   return (
     <>
       <h1>Tables for {result.database.name}</h1>
-      {result.tables.length === 0 ? <p>No tables available.</p> : (
-        <ul>
+      {result.tables.length === 0 ? <p className="feedback">No tables available.</p> : (
+        <ul className="resource-list" role="list">
           {result.tables.map((table) => (
-            <li key={JSON.stringify([table.schema, table.name])}>{table.schema}.{table.name}</li>
+            <li className="resource-row" key={JSON.stringify([table.schema, table.name])}>
+              {table.schema}.{table.name}
+            </li>
           ))}
         </ul>
       )}
