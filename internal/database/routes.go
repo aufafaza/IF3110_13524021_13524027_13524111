@@ -21,4 +21,5 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, guard *access.Guard) {
 	mux.Handle("GET /databases", guard.RequireLogin(http.HandlerFunc(h.SelectPage)))
 	mux.Handle("GET /databases/{dbID}", view(http.HandlerFunc(h.TablesPage)))
 	mux.Handle("GET /databases/{dbID}/table", view(http.HandlerFunc(h.TablePage)))
+	h.RegisterAPIRoutes(mux, guard)
 }
