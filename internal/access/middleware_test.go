@@ -2,6 +2,7 @@ package access_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -26,9 +27,12 @@ func (f *fakeChecker) EffectiveLevel(_ context.Context, userID, dbID int64) (acc
 }
 
 type result struct {
-	status int
-	called bool
-	loc    string
+	status      int
+	called      bool
+	loc         string
+	contentType string
+	body        string
+	hxRedirect  string
 }
 
 func run(mw func(http.Handler) http.Handler, user *access.User, pathID string) result {
@@ -47,7 +51,7 @@ func run(mw func(http.Handler) http.Handler, user *access.User, pathID string) r
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	return result{status: rec.Code, called: called, loc: rec.Header().Get("Location")}
+	return result{status: rec.Code, called: called, loc: rec.Header().Get("Location"), contentType: rec.Header().Get("Content-Type"), body: rec.Body.String(), hxRedirect: rec.Header().Get("HX-Redirect")}
 }
 
 var (
@@ -56,11 +60,12 @@ var (
 )
 
 func TestRequireLogin(t *testing.T) {
-	g := access.NewGuard(&fakeChecker{}, "/login")
+	g := access.NewGuard(&fakeChecker{})
 
-	t.Run("anonymous is redirected", func(t *testing.T) {
+	t.Run("anonymous gets JSON unauthorized", func(t *testing.T) {
 		r := run(g.RequireLogin, nil, "")
-		if r.status != http.StatusSeeOther || r.loc != "/login" || r.called {
+		assertJSONDenial(t, r)
+		if r.status != http.StatusUnauthorized || r.loc != "" || r.called {
 			t.Errorf("got %+v", r)
 		}
 	})
@@ -73,7 +78,7 @@ func TestRequireLogin(t *testing.T) {
 }
 
 func TestRequireAdmin(t *testing.T) {
-	g := access.NewGuard(&fakeChecker{}, "/login")
+	g := access.NewGuard(&fakeChecker{})
 
 	tests := []struct {
 		name       string
@@ -81,13 +86,16 @@ func TestRequireAdmin(t *testing.T) {
 		wantStatus int
 		wantCalled bool
 	}{
-		{"anonymous is redirected", nil, http.StatusSeeOther, false},
+		{"anonymous gets JSON unauthorized", nil, http.StatusUnauthorized, false},
 		{"non-admin is forbidden", member, http.StatusForbidden, false},
 		{"admin passes", admin, http.StatusOK, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := run(g.RequireAdmin, tc.user, "")
+			if !tc.wantCalled {
+				assertJSONDenial(t, r)
+			}
 			if r.status != tc.wantStatus || r.called != tc.wantCalled {
 				t.Errorf("got %+v", r)
 			}
@@ -106,7 +114,7 @@ func TestRequireDBAccess(t *testing.T) {
 		wantStatus int
 		wantCalled bool
 	}{
-		{"anonymous is redirected", nil, access.LevelView, access.LevelEdit, nil, "5", http.StatusSeeOther, false},
+		{"anonymous gets JSON unauthorized", nil, access.LevelView, access.LevelEdit, nil, "5", http.StatusUnauthorized, false},
 		{"no grant hides the database", member, access.LevelView, access.LevelNone, nil, "5", http.StatusNotFound, false},
 		{"view-only blocked from edit", member, access.LevelEdit, access.LevelView, nil, "5", http.StatusForbidden, false},
 		{"view-only can view", member, access.LevelView, access.LevelView, nil, "5", http.StatusOK, true},
@@ -120,9 +128,12 @@ func TestRequireDBAccess(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			checker := &fakeChecker{level: tc.level, err: tc.checkerErr}
-			g := access.NewGuard(checker, "/login")
+			g := access.NewGuard(checker)
 
 			r := run(g.RequireDBAccess(tc.min), tc.user, tc.pathID)
+			if !tc.wantCalled {
+				assertJSONDenial(t, r)
+			}
 			if r.status != tc.wantStatus || r.called != tc.wantCalled {
 				t.Errorf("got %+v, want status=%d called=%v", r, tc.wantStatus, tc.wantCalled)
 			}
@@ -132,7 +143,7 @@ func TestRequireDBAccess(t *testing.T) {
 
 func TestRequireDBAccessPassesUserAndDatabaseToChecker(t *testing.T) {
 	checker := &fakeChecker{level: access.LevelEdit}
-	g := access.NewGuard(checker, "/login")
+	g := access.NewGuard(checker)
 
 	run(g.RequireDBAccess(access.LevelView), member, "42")
 
@@ -143,7 +154,7 @@ func TestRequireDBAccessPassesUserAndDatabaseToChecker(t *testing.T) {
 
 func TestRequireDBAccessDoesNotCallCheckerWhenAnonymous(t *testing.T) {
 	checker := &fakeChecker{level: access.LevelEdit}
-	g := access.NewGuard(checker, "/login")
+	g := access.NewGuard(checker)
 
 	run(g.RequireDBAccess(access.LevelView), nil, "42")
 
@@ -152,36 +163,21 @@ func TestRequireDBAccessDoesNotCallCheckerWhenAnonymous(t *testing.T) {
 	}
 }
 
-func TestGuard_HTMXRequestsGetAnHXRedirectInsteadOfAHTMLRedirect(t *testing.T) {
-	g := access.NewGuard(&fakeChecker{}, "/login")
-	guards := map[string]func(http.Handler) http.Handler{
-		"RequireLogin":    g.RequireLogin,
-		"RequireAdmin":    g.RequireAdmin,
-		"RequireDBAccess": g.RequireDBAccess(access.LevelView),
+func assertJSONDenial(t *testing.T, got result) {
+	t.Helper()
+	if got.contentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got.contentType)
 	}
-	for name, mw := range guards {
-		t.Run(name, func(t *testing.T) {
-			called := false
-			h := mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
-
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			req.Header.Set("HX-Request", "true")
-			req.SetPathValue(access.DatabaseIDParam, "1")
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-
-			if called {
-				t.Error("next handler ran for an anonymous request")
-			}
-			if rec.Code != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", rec.Code)
-			}
-			if got := rec.Header().Get("HX-Redirect"); got != "/login" {
-				t.Errorf("HX-Redirect = %q, want /login", got)
-			}
-			if rec.Header().Get("Location") != "" {
-				t.Error("an htmx request must not get a Location redirect; the login page would be swapped into a fragment")
-			}
-		})
+	if got.loc != "" || got.hxRedirect != "" {
+		t.Errorf("unexpected redirect headers: %+v", got)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(got.body), &payload); err != nil || payload.Error == "" {
+		t.Errorf("expected JSON error, got %q", got.body)
+	}
+	if got.called {
+		t.Error("denied request reached protected handler")
 	}
 }

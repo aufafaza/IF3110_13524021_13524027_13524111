@@ -89,7 +89,7 @@ func main() {
 		Home:         home.NewHandler(tmpl),
 		Admin:        admin.NewHandler(adminService, tmpl),
 		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
-		Guard:        access.NewGuard(checker, "/login"),
+		Guard:        access.NewGuard(checker),
 		Databases:    database.NewHandler(registry, database.NewViewer(registry), checker, nil, tmpl),
 		Migrations:   migration.NewHandler(migrationService),
 	})

@@ -32,18 +32,16 @@ func databaseRouter(t *testing.T, valid bool) http.Handler {
 	return New(Deps{
 		Auth:         auth.NewHandler(fakeLogin{}, sessions, cookie),
 		Authenticate: middleware.NewAuthenticator(sessions, fakeUsers{}, cookie),
-		Guard:        access.NewGuard(noLevelChecker{}, "/login"),
+		Guard:        access.NewGuard(noLevelChecker{}),
 		Databases:    database.NewHandler(nil, nil, noLevelChecker{}, nil, tmpl),
 	})
 }
 
-func TestDatabaseRoutes_AnonymousRedirectsToLogin(t *testing.T) {
+func TestDatabaseRoutes_AnonymousGetsJSONUnauthorized(t *testing.T) {
 	for _, path := range []string{"/databases", "/databases/1", "/databases/1/table?schema=a&table=b", "/admin/databases"} {
 		rec := httptest.NewRecorder()
 		databaseRouter(t, false).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-		if rec.Code != http.StatusSeeOther {
-			t.Errorf("%s: status %d, want 303", path, rec.Code)
-		}
+		assertJSONAccessError(t, rec, http.StatusUnauthorized, "unauthenticated")
 	}
 }
 
@@ -52,9 +50,7 @@ func TestDatabaseRoutes_NonAdminCannotManage(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: testCookie, Value: "tok"})
 	rec := httptest.NewRecorder()
 	databaseRouter(t, true).ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status %d, want 403", rec.Code)
-	}
+	assertJSONAccessError(t, rec, http.StatusForbidden, "forbidden")
 }
 
 func TestDatabaseRoutes_NoGrantIs404(t *testing.T) {
@@ -62,7 +58,5 @@ func TestDatabaseRoutes_NoGrantIs404(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: testCookie, Value: "tok"})
 	rec := httptest.NewRecorder()
 	databaseRouter(t, true).ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status %d, want 404", rec.Code)
-	}
+	assertJSONAccessError(t, rec, http.StatusNotFound, "not found")
 }
