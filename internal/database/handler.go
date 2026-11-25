@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -97,56 +96,6 @@ type accessibleDB struct {
 	ID    int64        `json:"id"`
 	Name  string       `json:"name"`
 	Level access.Level `json:"-"`
-}
-
-type selectView struct {
-	Databases []accessibleDB
-}
-
-type tableLink struct {
-	Name   string
-	URL    string
-	Active bool
-}
-
-type schemaGroup struct {
-	Name   string
-	Tables []tableLink
-}
-
-type tablesView struct {
-	DatabaseID   int64
-	DatabaseName string
-	Level        access.Level
-	Schemas      []schemaGroup
-}
-
-type tabLink struct {
-	Label  string
-	Key    string
-	URL    string
-	Active bool
-}
-
-type tableView struct {
-	DatabaseID   int64
-	DatabaseName string
-	Level        access.Level
-	Schemas      []schemaGroup
-	Schema       string
-	Table        string
-	Tab          string
-	Tabs         []tabLink
-	Info         TableInfo
-	Data         DataPage
-	PrevURL      string
-	NextURL      string
-}
-
-type errorView struct {
-	Heading string
-	Message string
-	BackURL string
 }
 
 func (h *Handler) fail(w http.ResponseWriter, op string, err error) {
@@ -326,20 +275,6 @@ func (h *Handler) AdminDelete(w http.ResponseWriter, r *http.Request) {
 	h.renderDatabases(w, r, notice{Message: "Database removed. Its group grants and migration history were removed too."}, dbForm{Port: 5432, SSLMode: "prefer"})
 }
 
-func (h *Handler) SelectPage(w http.ResponseWriter, r *http.Request) {
-	user, ok := access.UserFromContext(r.Context())
-	if !ok {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
-		return
-	}
-	out, err := h.accessibleDatabases(r.Context(), user.ID)
-	if err != nil {
-		h.fail(w, "list", err)
-		return
-	}
-	h.tmpl.Page(w, r, http.StatusOK, "db/select", "Select database", selectView{Databases: out})
-}
-
 func (h *Handler) accessibleDatabases(ctx context.Context, userID int64) ([]accessibleDB, error) {
 	all, err := h.reg.List(ctx)
 	if err != nil {
@@ -356,164 +291,6 @@ func (h *Handler) accessibleDatabases(ctx context.Context, userID int64) ([]acce
 		}
 	}
 	return out, nil
-}
-
-func tableURL(dbID int64, schema, table, tab string, page int) string {
-	q := url.Values{"schema": {schema}, "table": {table}}
-	if tab != "" && tab != "columns" {
-		q.Set("tab", tab)
-	}
-	if page > 1 {
-		q.Set("page", strconv.Itoa(page))
-	}
-	return "/databases/" + strconv.FormatInt(dbID, 10) + "/table?" + q.Encode()
-}
-
-func groupTables(dbID int64, tables []Table, activeSchema, activeTable string) []schemaGroup {
-	var groups []schemaGroup
-	for _, t := range tables {
-		if len(groups) == 0 || groups[len(groups)-1].Name != t.Schema {
-			groups = append(groups, schemaGroup{Name: t.Schema})
-		}
-		g := &groups[len(groups)-1]
-		g.Tables = append(g.Tables, tableLink{
-			Name:   t.Name,
-			URL:    tableURL(dbID, t.Schema, t.Name, "", 1),
-			Active: t.Schema == activeSchema && t.Name == activeTable,
-		})
-	}
-	return groups
-}
-
-func (h *Handler) viewerContext(w http.ResponseWriter, r *http.Request) (Database, access.Level, bool) {
-	id, ok := pathID(r, access.DatabaseIDParam)
-	if !ok {
-		http.NotFound(w, r)
-		return Database{}, access.LevelNone, false
-	}
-	user, _ := access.UserFromContext(r.Context())
-	level, err := h.checker.EffectiveLevel(r.Context(), user.ID, id)
-	if err != nil {
-		h.fail(w, "effective level", err)
-		return Database{}, access.LevelNone, false
-	}
-	if level == access.LevelNone {
-		http.NotFound(w, r)
-		return Database{}, access.LevelNone, false
-	}
-	d, err := h.reg.Get(r.Context(), id)
-	if err != nil {
-		h.fail(w, "get", err)
-		return Database{}, access.LevelNone, false
-	}
-	return d, level, true
-}
-
-func (h *Handler) viewerFailure(w http.ResponseWriter, r *http.Request, d Database, op string, err error) {
-	back := "/databases/" + strconv.FormatInt(d.ID, 10)
-	switch {
-	case errors.Is(err, ErrDatabaseNotFound), errors.Is(err, ErrTableNotFound):
-		http.NotFound(w, r)
-	case errors.Is(err, ErrConnectionFailed):
-		msg, _ := connMessage(err)
-		log.Printf("databases: %s (db %d): %v", op, d.ID, err)
-		h.tmpl.Page(w, r, http.StatusBadGateway, "db/error", "Connection failed", errorView{
-			Heading: "Cannot reach " + d.Name,
-			Message: msg + " Ask a platform admin to check the connection settings.",
-			BackURL: "/databases",
-		})
-	default:
-		log.Printf("databases: %s (db %d): %v", op, d.ID, err)
-		h.tmpl.Page(w, r, http.StatusInternalServerError, "db/error", "Error", errorView{
-			Heading: "Something went wrong",
-			Message: "The request could not be completed.",
-			BackURL: back,
-		})
-	}
-}
-
-func (h *Handler) TablesPage(w http.ResponseWriter, r *http.Request) {
-	d, level, ok := h.viewerContext(w, r)
-	if !ok {
-		return
-	}
-	tables, err := h.viewer.Tables(r.Context(), d.ID)
-	if err != nil {
-		h.viewerFailure(w, r, d, "tables", err)
-		return
-	}
-	h.tmpl.Page(w, r, http.StatusOK, "db/tables", d.Name, tablesView{
-		DatabaseID: d.ID, DatabaseName: d.Name, Level: level,
-		Schemas: groupTables(d.ID, tables, "", ""),
-	})
-}
-
-var tabOrder = []struct{ Key, Label string }{
-	{"columns", "Columns"}, {"constraints", "Constraints"}, {"indexes", "Indexes"}, {"data", "Data"},
-}
-
-func (h *Handler) TablePage(w http.ResponseWriter, r *http.Request) {
-	d, level, ok := h.viewerContext(w, r)
-	if !ok {
-		return
-	}
-	q := r.URL.Query()
-	schema, table := q.Get("schema"), q.Get("table")
-	if schema == "" || table == "" {
-		http.NotFound(w, r)
-		return
-	}
-	tab := q.Get("tab")
-	switch tab {
-	case "columns", "constraints", "indexes", "data":
-	case "":
-		tab = "columns"
-	default:
-		http.NotFound(w, r)
-		return
-	}
-	page, _ := strconv.Atoi(q.Get("page"))
-	if page < 1 {
-		page = 1
-	}
-
-	view := tableView{DatabaseID: d.ID, DatabaseName: d.Name, Level: level, Schema: schema, Table: table, Tab: tab}
-
-	if tab == "data" {
-		dp, err := h.viewer.Rows(r.Context(), d.ID, schema, table, page)
-		if err != nil {
-			h.viewerFailure(w, r, d, "rows", err)
-			return
-		}
-		view.Data = dp
-		if dp.Page > 1 {
-			view.PrevURL = tableURL(d.ID, schema, table, "data", dp.Page-1)
-		}
-		if dp.HasNext {
-			view.NextURL = tableURL(d.ID, schema, table, "data", dp.Page+1)
-		}
-	} else {
-		info, err := h.viewer.TableInfo(r.Context(), d.ID, schema, table)
-		if err != nil {
-			h.viewerFailure(w, r, d, "table info", err)
-			return
-		}
-		view.Info = info
-	}
-
-	tables, err := h.viewer.Tables(r.Context(), d.ID)
-	if err != nil {
-		h.viewerFailure(w, r, d, "tables", err)
-		return
-	}
-	view.Schemas = groupTables(d.ID, tables, schema, table)
-	for _, t := range tabOrder {
-		view.Tabs = append(view.Tabs, tabLink{
-			Label: t.Label, Key: t.Key, Active: t.Key == tab,
-			URL: tableURL(d.ID, schema, table, t.Key, 1),
-		})
-	}
-	h.tmpl.Page(w, r, http.StatusOK, "db/table", schema+"."+table, view)
 }
 
 type notice struct {

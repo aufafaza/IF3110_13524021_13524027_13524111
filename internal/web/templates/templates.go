@@ -12,13 +12,12 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
 
-//go:embed layout.html home.html admin/*.html db/*.html partials/*.html
+//go:embed layout.html home.html admin/*.html partials/*.html
 var files embed.FS
 
 var pageNames = []string{
 	"home", "admin/users", "admin/groups", "admin/group",
 	"admin/databases", "admin/database",
-	"db/select", "db/tables", "db/table", "db/error",
 }
 
 type View struct {

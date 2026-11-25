@@ -12,21 +12,26 @@ var ErrTableNotFound = errors.New("dbmanager: table not found")
 type (
 	Table  struct{ Schema, Name string }
 	Column struct {
-		Name, Type string
-		Nullable   bool
-		Default    *string
+		Name     string  `json:"name"`
+		Type     string  `json:"type"`
+		Nullable bool    `json:"nullable"`
+		Default  *string `json:"default"`
 	}
-	Constraint struct{ Name, Type, Definition string }
-	Index      struct {
-		Name       string
-		Unique     bool
-		Method     string
-		Definition string
+	Constraint struct {
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		Definition string `json:"definition"`
+	}
+	Index struct {
+		Name       string `json:"name"`
+		Unique     bool   `json:"unique"`
+		Method     string `json:"method"`
+		Definition string `json:"definition"`
 	}
 	TableInfo struct {
-		Columns     []Column
-		Constraints []Constraint
-		Indexes     []Index
+		Columns     []Column     `json:"columns"`
+		Constraints []Constraint `json:"constraints"`
+		Indexes     []Index      `json:"indexes"`
 	}
 )
 

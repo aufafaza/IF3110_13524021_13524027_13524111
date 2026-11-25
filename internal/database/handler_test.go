@@ -2,6 +2,7 @@ package database_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -95,22 +96,6 @@ func newDBRig(t *testing.T, levels map[int64]access.Level, test database.ConnTes
 	return dbRig{h: database.NewHandler(reg, v, fakeChecker{levels}, test, tmpl), reg: reg, viewer: v}
 }
 
-func TestDatabases_SelectListsOnlyAccessible(t *testing.T) {
-	rig := newDBRig(t, map[int64]access.Level{1: access.LevelEdit}, nil)
-	rec := serve(rig.h.SelectPage, adminRequest(http.MethodGet, "/databases", nil, nil))
-
-	body := rec.Body.String()
-	if rec.Code != http.StatusOK || !strings.Contains(body, "sales") || !strings.Contains(body, "View &#43; Edit") {
-		t.Fatalf("status %d, body missing accessible database", rec.Code)
-	}
-	if strings.Contains(body, "payroll") {
-		t.Error("a database without a grant was listed")
-	}
-	if strings.Contains(body, "db1") {
-		t.Error("host leaked to a normal user")
-	}
-}
-
 func TestDatabases_AdminCreatePassesFormAndHidesPassword(t *testing.T) {
 	rig := newDBRig(t, nil, nil)
 	rec := serve(rig.h.AdminCreate, adminRequest(http.MethodPost, "/admin/databases", url.Values{
@@ -186,97 +171,71 @@ func TestDatabases_DeleteAndUnknownID(t *testing.T) {
 	}
 }
 
-func TestDatabases_TablesPage(t *testing.T) {
-	rig := newDBRig(t, map[int64]access.Level{1: access.LevelView}, nil)
-	rec := serve(rig.h.TablesPage, adminRequest(http.MethodGet, "/databases/1", nil, map[string]string{"dbID": "1"}))
+func TestDatabases_TableBrowsingAPI(t *testing.T) {
+	levels := map[int64]access.Level{1: access.LevelView}
+	rig := newDBRig(t, levels, nil)
+	mux := http.NewServeMux()
+	rig.h.RegisterRoutes(mux, access.NewGuard(fakeChecker{levels}))
 
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "orders") || !strings.Contains(rec.Body.String(), "View Only") {
-		t.Errorf("status %d, body %q", rec.Code, rec.Body.String())
-	}
-}
-
-func TestDatabases_NoAccessIs404(t *testing.T) {
-	rig := newDBRig(t, map[int64]access.Level{}, nil)
-	rec := serve(rig.h.TablesPage, adminRequest(http.MethodGet, "/databases/1", nil, map[string]string{"dbID": "1"}))
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status %d, want 404", rec.Code)
-	}
-}
-
-func TestDatabases_TablePageTabs(t *testing.T) {
 	d := "now()"
-	rig := newDBRig(t, map[int64]access.Level{1: access.LevelView}, nil)
 	rig.viewer.info = database.TableInfo{
-		Columns:     []database.Column{{Name: "id", Type: "integer"}, {Name: "created", Type: "timestamptz", Default: &d}},
-		Constraints: []database.Constraint{{Name: "orders_pkey", Type: "PRIMARY KEY", Definition: "PRIMARY KEY (id)"}},
-		Indexes:     []database.Index{{Name: "orders_pkey", Unique: true, Method: "btree", Definition: "CREATE UNIQUE INDEX ..."}},
+		Columns:     []database.Column{{Name: "created", Type: "timestamptz", Default: &d}},
+		Constraints: []database.Constraint{{Name: "orders_pkey", Type: "PRIMARY KEY"}},
+		Indexes:     []database.Index{{Name: "orders_pkey", Unique: true, Method: "btree"}},
 	}
 	rig.viewer.data = database.DataPage{
-		Columns: []string{"id", "note"}, Page: 2, HasNext: true,
-		Rows: [][]database.Cell{{{Text: "1"}, {Null: true}}, {{Text: "<b>x</b>"}, {Text: "y"}}},
+		Columns: []string{"note"}, Page: 2, HasNext: true,
+		Rows: [][]database.Cell{{{Null: true}}, {{Text: "<b>x</b>"}}},
 	}
 
-	get := func(query string) string {
-		rec := serve(rig.h.TablePage, adminRequest(http.MethodGet, "/databases/1/table?"+query, nil, map[string]string{"dbID": "1"}))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: status %d", query, rec.Code)
-		}
-		return rec.Body.String()
+	get := func(path string) *httptest.ResponseRecorder {
+		return serve(mux.ServeHTTP, adminRequest(http.MethodGet, path, nil, nil))
+	}
+	const table = "/api/databases/1/table"
+	const query = "?schema=public&table=orders"
+	info := get(table + query)
+	if info.Code != http.StatusOK || !strings.Contains(info.Body.String(), `"type":"timestamptz"`) ||
+		!strings.Contains(info.Body.String(), `"type":"PRIMARY KEY"`) ||
+		!strings.Contains(info.Body.String(), `"method":"btree"`) {
+		t.Fatalf("table info: %d %s", info.Code, info.Body)
 	}
 
-	for query, want := range map[string]string{
-		"schema=public&table=orders":                 "timestamptz",
-		"schema=public&table=orders&tab=constraints": "PRIMARY KEY (id)",
-		"schema=public&table=orders&tab=indexes":     "btree",
-		"schema=public&table=orders&tab=data&page=2": "NULL",
+	rows := get(table + "/rows" + query + "&page=2")
+	var data database.DataPage
+	if err := json.Unmarshal(rows.Body.Bytes(), &data); err != nil || rows.Code != http.StatusOK {
+		t.Fatalf("table rows: %d %s (%v)", rows.Code, rows.Body, err)
+	}
+	if data.Page != 2 || !data.HasNext || len(data.Rows) != 2 || !data.Rows[0][0].Null || data.Rows[1][0].Text != "<b>x</b>" {
+		t.Errorf("unexpected data page: %+v", data)
+	}
+	if len(rig.viewer.rowsPages) != 1 || rig.viewer.rowsPages[0] != 2 {
+		t.Errorf("rows pages = %v, want [2]", rig.viewer.rowsPages)
+	}
+
+	for path, want := range map[string]int{
+		table:                                 http.StatusBadRequest,
+		table + "/rows" + query + "&page=0":   http.StatusBadRequest,
+		"/api/databases/2/table" + query:      http.StatusForbidden,
+		"/api/databases/2/table/rows" + query: http.StatusForbidden,
+		"/databases/1/table" + query:          http.StatusNotFound,
 	} {
-		if body := get(query); !strings.Contains(body, want) {
-			t.Errorf("%s: missing %q", query, want)
+		if rec := get(path); rec.Code != want {
+			t.Errorf("%s: got status %d, want %d", path, rec.Code, want)
 		}
 	}
-	body := get("schema=public&table=orders&tab=data&page=2")
-	if strings.Contains(body, "<b>x</b>") {
-		t.Error("cell content was not escaped")
-	}
-	if !strings.Contains(body, "Previous") || !strings.Contains(body, "Next") {
-		t.Error("pager links missing")
-	}
-	if len(rig.viewer.rowsPages) == 0 || rig.viewer.rowsPages[len(rig.viewer.rowsPages)-1] != 2 {
-		t.Errorf("rows pages = %v", rig.viewer.rowsPages)
-	}
-}
 
-func TestDatabases_TablePageBadInput(t *testing.T) {
-	rig := newDBRig(t, map[int64]access.Level{1: access.LevelView}, nil)
-	for _, q := range []string{"", "schema=public", "schema=public&table=orders&tab=bogus"} {
-		rec := serve(rig.h.TablePage, adminRequest(http.MethodGet, "/databases/1/table?"+q, nil, map[string]string{"dbID": "1"}))
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%q: status %d, want 404", q, rec.Code)
-		}
-	}
-}
-
-func TestDatabases_ViewerFailures(t *testing.T) {
-	for name, tc := range map[string]struct {
-		err  error
-		code int
-		want string
+	for _, tc := range []struct {
+		err    error
+		status int
 	}{
-		"connection": {&database.ConnError{Reason: "koneksi timeout"}, http.StatusBadGateway, "Cannot reach sales"},
-		"no table":   {database.ErrTableNotFound, http.StatusNotFound, ""},
-		"other":      {errors.New("boom password=hunter2"), http.StatusInternalServerError, ""},
+		{database.ErrTableNotFound, http.StatusNotFound},
+		{&database.ConnError{Reason: "connection failed"}, http.StatusBadGateway},
+		{errors.New("database error with private details"), http.StatusInternalServerError},
 	} {
-		t.Run(name, func(t *testing.T) {
-			rig := newDBRig(t, map[int64]access.Level{1: access.LevelView}, nil)
-			rig.viewer.err = tc.err
-			rec := serve(rig.h.TablePage, adminRequest(http.MethodGet, "/databases/1/table?schema=public&table=orders", nil, map[string]string{"dbID": "1"}))
-			if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.want) {
-				t.Errorf("status %d, body %q", rec.Code, rec.Body.String())
-			}
-			if strings.Contains(rec.Body.String(), "hunter2") {
-				t.Error("internal error detail leaked to the client")
-			}
-		})
+		rig.viewer.err = tc.err
+		if rec := get(table + query); rec.Code != tc.status || strings.Contains(rec.Body.String(), tc.err.Error()) {
+			t.Errorf("viewer failure: got %d %s, want %d with a public message", rec.Code, rec.Body, tc.status)
+		}
 	}
 }
 
