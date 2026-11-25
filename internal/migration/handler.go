@@ -118,7 +118,15 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	level, err := h.service.UserLevel(r.Context(), user.ID, dbID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Migration
+		CanEdit bool `json:"can_edit"`
+	}{m, level >= access.LevelEdit})
 }
 
 func (h *Handler) handleExplain(w http.ResponseWriter, r *http.Request) {

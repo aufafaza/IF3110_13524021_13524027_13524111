@@ -7,6 +7,7 @@ import (
 )
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, guard *access.Guard) {
+	h.RegisterAPIRoutes(mux, guard)
 	admin := guard.RequireAdmin
 
 	mux.Handle("GET /admin/databases", admin(http.HandlerFunc(h.AdminListPage)))
