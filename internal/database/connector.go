@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 )
 
 const connectTimeout = 5 * time.Second
@@ -52,6 +54,7 @@ func connect(ctx context.Context, in DatabaseInput) (*pgxpool.Pool, error) {
 	}
 	cfg.MaxConns = 4
 	cfg.ConnConfig.ConnectTimeout = connectTimeout
+	cfg.ConnConfig.Tracer = observability.NewPGXTracer()
 
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
