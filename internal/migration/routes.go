@@ -10,6 +10,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	viewGuard := access.RequireDBAccess(h.service.checker, access.LevelView)
 	editGuard := access.RequireDBAccess(h.service.checker, access.LevelEdit)
 
+	mux.Handle("GET /api/databases/{dbID}/migrations", viewGuard(http.HandlerFunc(h.handleListHistory)))
+	mux.Handle("GET /api/databases/{dbID}/migrations/{migrationID}", viewGuard(http.HandlerFunc(h.handleDetail)))
+
 	mux.Handle("GET /databases/{dbID}/migrations", viewGuard(http.HandlerFunc(h.handleListHistory)))
 	mux.Handle("POST /databases/{dbID}/migrations", editGuard(http.HandlerFunc(h.handleCreateOrPreview)))
 	mux.Handle("GET /databases/{dbID}/migrations/{migrationID}", viewGuard(http.HandlerFunc(h.handleDetail)))
