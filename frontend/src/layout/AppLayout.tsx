@@ -26,6 +26,13 @@ export function AppLayout() {
         <div className="app-header-inner">
           <nav aria-label="Main navigation">
             <Link to="/databases">Databases</Link>
+            {state.status === 'ready' && state.session.user?.is_platform_admin && (
+              <>
+                <Link to="/admin/users">Users</Link>
+                <Link to="/admin/groups">Groups</Link>
+                <Link to="/admin/databases">Manage databases</Link>
+              </>
+            )}
           </nav>
           <div className="account">
             <span className="account-name">{username}</span>
