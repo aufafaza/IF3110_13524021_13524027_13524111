@@ -300,3 +300,33 @@ func serve(handler http.HandlerFunc, req *http.Request) *httptest.ResponseRecord
 	handler(rec, req)
 	return rec
 }
+
+func TestDatabases_BrowsingAPIEnforcesGrants(t *testing.T) {
+	levels := map[int64]access.Level{1: access.LevelView}
+	rig := newDBRig(t, levels, nil)
+	mux := http.NewServeMux()
+	rig.h.RegisterRoutes(mux, access.NewGuard(fakeChecker{levels}))
+
+	for _, tc := range []struct {
+		path          string
+		authenticated bool
+		status        int
+		body          string
+	}{
+		{"/api/databases", false, http.StatusUnauthorized, `{"error":"unauthenticated"}`},
+		{"/api/databases/1/tables", false, http.StatusUnauthorized, `{"error":"unauthenticated"}`},
+		{"/api/databases", true, http.StatusOK, `{"databases":[{"id":1,"name":"sales"}]}`},
+		{"/api/databases/1/tables", true, http.StatusOK, `{"database":{"id":1,"name":"sales"},"tables":[{"schema":"public","name":"orders"}]}`},
+		{"/api/databases/2/tables", true, http.StatusForbidden, `{"error":"forbidden: insufficient database permissions"}`},
+	} {
+		r := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		if tc.authenticated {
+			r = adminRequest(http.MethodGet, tc.path, nil, nil)
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != tc.body {
+			t.Errorf("%s (signed in: %t): got %d %s", tc.path, tc.authenticated, rec.Code, rec.Body.String())
+		}
+	}
+}
