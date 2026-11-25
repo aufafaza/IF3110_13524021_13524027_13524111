@@ -34,8 +34,13 @@ type Database struct {
 }
 
 type DatabaseInput struct {
-	Name, Host, DBName, DBUser, Password, SSLMode string
-	Port                                          int
+	Name     string `json:"name"`
+	Host     string `json:"host"`
+	DBName   string `json:"db_name"`
+	DBUser   string `json:"db_user"`
+	Password string `json:"password"`
+	SSLMode  string `json:"sslmode"`
+	Port     int    `json:"port"`
 }
 
 func (in *DatabaseInput) validate(requirePassword bool) error {

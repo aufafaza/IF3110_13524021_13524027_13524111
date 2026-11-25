@@ -125,10 +125,10 @@ func (s *PostgresStore) SetPasswordHash(ctx context.Context, userID int64, passw
 
 func (s *PostgresStore) ListGroups(ctx context.Context) ([]Group, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT g.id, g.name, count(ug.user_id)
+		`SELECT g.id, g.name, g.leader_user_id, count(ug.user_id)
 		FROM groups g
 		LEFT JOIN user_groups ug ON ug.group_id = g.id
-		GROUP BY g.id, g.name
+		GROUP BY g.id, g.name, g.leader_user_id
 		ORDER BY g.name`)
 	if err != nil {
 		return nil, fmt.Errorf("admin: list groups: %w", err)
@@ -138,7 +138,7 @@ func (s *PostgresStore) ListGroups(ctx context.Context) ([]Group, error) {
 	var groups []Group
 	for rows.Next() {
 		var g Group
-		if err := rows.Scan(&g.ID, &g.Name, &g.MemberCount); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.LeaderUserID, &g.MemberCount); err != nil {
 			return nil, fmt.Errorf("admin: list groups: %w", err)
 		}
 		groups = append(groups, g)
@@ -152,12 +152,12 @@ func (s *PostgresStore) ListGroups(ctx context.Context) ([]Group, error) {
 func (s *PostgresStore) GetGroup(ctx context.Context, groupID int64) (Group, error) {
 	var g Group
 	err := s.pool.QueryRow(ctx,
-		`SELECT g.id, g.name, count(ug.user_id)
+		`SELECT g.id, g.name, g.leader_user_id, count(ug.user_id)
 		FROM groups g
 		LEFT JOIN user_groups ug ON ug.group_id = g.id
 		WHERE g.id = $1
-		GROUP BY g.id, g.name`, groupID,
-	).Scan(&g.ID, &g.Name, &g.MemberCount)
+		GROUP BY g.id, g.name, g.leader_user_id`, groupID,
+	).Scan(&g.ID, &g.Name, &g.LeaderUserID, &g.MemberCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Group{}, ErrNotFound
 	}
@@ -165,6 +165,21 @@ func (s *PostgresStore) GetGroup(ctx context.Context, groupID int64) (Group, err
 		return Group{}, fmt.Errorf("admin: get group: %w", err)
 	}
 	return g, nil
+}
+
+func (s *PostgresStore) SetGroupLeader(ctx context.Context, groupID, userID int64) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE groups g SET leader_user_id=$2
+		WHERE g.id=$1 AND EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.is_active)`, groupID, userID)
+	if err != nil {
+		if pgCode(err) == pgForeignKeyViolation {
+			return ErrNotFound
+		}
+		return fmt.Errorf("admin: set group leader: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) CreateGroup(ctx context.Context, name string) (int64, error) {

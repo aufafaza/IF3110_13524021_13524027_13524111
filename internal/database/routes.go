@@ -25,4 +25,5 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, guard *access.Guard) {
 	mux.HandleFunc("GET /api/databases", h.listDatabasesAPI)
 	apiView := access.RequireDBAccess(h.checker, access.LevelView)
 	mux.Handle("GET /api/databases/{dbID}/tables", apiView(http.HandlerFunc(h.listTablesAPI)))
+	h.RegisterAPIRoutes(mux, guard)
 }

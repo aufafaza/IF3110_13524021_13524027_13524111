@@ -146,7 +146,8 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Confirm bool `json:"confirm"`
+		Confirm   bool   `json:"confirm"`
+		Operation string `json:"operation"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -155,7 +156,7 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ErrConfirmationMissing)
 		return
 	}
-	executed, err := h.service.Execute(r.Context(), user.ID, dbID, id)
+	executed, err := h.service.ExecuteOperation(r.Context(), user.ID, dbID, id, in.Operation)
 	if err != nil {
 		if executed.ID != 0 && executed.Status == StatusFailed {
 			writeJSON(w, http.StatusUnprocessableEntity, executed)
@@ -165,6 +166,81 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, executed)
+}
+
+func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Operation string `json:"operation"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, review)
+}
+
+func (h *Handler) handleListReviews(w http.ResponseWriter, r *http.Request) {
+	user, dbID, ok := h.requireUserAndDB(w, r)
+	if !ok {
+		return
+	}
+	reviews, err := h.service.ListReviews(r.Context(), user.ID, dbID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if reviews == nil {
+		reviews = []Review{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"database_id": dbID, "reviews": reviews})
+}
+
+func (h *Handler) handleReviewDecision(w http.ResponseWriter, r *http.Request) {
+	user, ok := access.UserFromContext(r.Context())
+	if !ok || user.ID <= 0 {
+		writeError(w, ErrUnauthenticated)
+		return
+	}
+	requestID := r.PathValue("requestID")
+	if requestID == "" {
+		writeError(w, errInvalidRequest)
+		return
+	}
+	var in struct {
+		Decision string `json:"decision"`
+		Comment  string `json:"comment"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	review, err := h.service.DecideReview(r.Context(), user.ID, requestID, in.Decision, in.Comment)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, review)
+}
+
+func (h *Handler) handleEnqueueReview(w http.ResponseWriter, r *http.Request) {
+	user, ok := access.UserFromContext(r.Context())
+	if !ok || user.ID <= 0 {
+		writeError(w, ErrUnauthenticated)
+		return
+	}
+	job, err := h.service.EnqueueApproved(r.Context(), user.ID, r.PathValue("requestID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (h *Handler) requireUserAndDB(w http.ResponseWriter, r *http.Request) (access.User, int64, bool) {
@@ -242,6 +318,12 @@ func statusForError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict):
 		return http.StatusConflict
+	case errors.Is(err, ErrReviewClosed), errors.Is(err, ErrRevisionChanged), errors.Is(err, ErrApprovalRequired), errors.Is(err, ErrQueueNotApproved):
+		return http.StatusConflict
+	case errors.Is(err, ErrNotGroupLeader), errors.Is(err, ErrLeaderMissing):
+		return http.StatusForbidden
+	case errors.Is(err, ErrInvalidOperation):
+		return http.StatusBadRequest
 	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing):
 		return http.StatusBadRequest
 	default:

@@ -10,6 +10,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/static"
@@ -41,7 +42,7 @@ func New(d Deps) http.Handler {
 		d.Migrations.RegisterRoutes(mux)
 	}
 
-	return d.Authenticate.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux))
+	return d.Authenticate.Middleware(observability.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux)))
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {
