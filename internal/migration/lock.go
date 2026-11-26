@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
@@ -109,4 +110,11 @@ func acquireAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, databaseID int
 		return unlockErr
 	}
 	return release, nil
+}
+
+func TryTargetTransactionLock(ctx context.Context, tx pgx.Tx, databaseID int64) (bool, error) {
+	var locked bool
+	err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)",
+		migrationLockNamespace, int32(databaseID)).Scan(&locked)
+	return locked, err
 }
