@@ -57,11 +57,6 @@ type Plans interface {
 	ResolveSQL(context.Context, Approval) (string, error)
 }
 
-// BatchPlans resolves the immutable plan for a batch-mode approval.
-// ScopeSQL returns the fixed membership as one unique immutable bigint
-// column named key. SQL is one UPDATE receiving the batch's bigint[] at $1
-// and returning the updated bigint key of every affected row via RETURNING.
-// The approved plan must avoid indirect changes outside the supplied scope.
 type BatchPlans interface {
 	ResolveBatch(context.Context, Approval) (BatchPlan, error)
 }

@@ -7,9 +7,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Mark the transaction in flight before any application or scope writes.
-// A worker with an expired lease cannot start another batch, and an error
-// while rereading the target cannot erase the need to reconcile.
 func (s *Store) markBatchPending(ctx context.Context, c claim) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE migration_async_jobs SET batch_pending = true
 		WHERE id = $1 AND claim_token = $2::uuid AND lease_until > clock_timestamp() AND owns_database`,

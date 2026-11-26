@@ -131,8 +131,6 @@ func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a att
 		VALUES ($1::uuid, $2::uuid, $3)`, c.ExecutionID, a.id, a.planHash); err != nil {
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
-	// ScopeSQL is an approved SELECT. Its outputs are streamed into the
-	// target ledger by PostgreSQL. A duplicate or NULL key fails the insert.
 	tag, err := tx.Exec(ctx, `INSERT INTO migration_worker.batch_scope (execution_id, key)
 		SELECT $1::uuid, scope.key FROM (`+a.batchPlan.ScopeSQL+"\n) AS scope", pgx.QueryExecModeExec, c.ExecutionID)
 	if err != nil {
@@ -143,7 +141,6 @@ func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a att
 }
 
 func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) error {
-	// Use separate query shapes to keep an index range scan after page one.
 	query := `SELECT key FROM migration_worker.batch_scope WHERE execution_id = $1::uuid ORDER BY key LIMIT $2`
 	args := []any{c.ExecutionID, a.batchPlan.Size}
 	if p.lastKey != nil {
