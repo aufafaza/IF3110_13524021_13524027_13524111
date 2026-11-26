@@ -13,6 +13,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migrationjob"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web"
@@ -85,13 +86,14 @@ func main() {
 	migrationService := migration.NewService(migrationRepo, migrationRunner, checker)
 
 	handler := web.New(web.Deps{
-		Auth:         auth.NewHandler(authService, sessions, cookie),
-		Home:         home.NewHandler(tmpl),
-		Admin:        admin.NewHandler(adminService, tmpl),
-		Authenticate: middleware.NewAuthenticator(sessions, userStore, cookie),
-		Guard:        access.NewGuard(checker),
-		Databases:    database.NewHandler(registry, database.NewViewer(registry), checker, nil, tmpl),
-		Migrations:   migration.NewHandler(migrationService),
+		Auth:          auth.NewHandler(authService, sessions, cookie),
+		Home:          home.NewHandler(tmpl),
+		Admin:         admin.NewHandler(adminService, tmpl),
+		Authenticate:  middleware.NewAuthenticator(sessions, userStore, cookie),
+		Guard:         access.NewGuard(checker),
+		Databases:     database.NewHandler(registry, database.NewViewer(registry), checker, nil, tmpl),
+		Migrations:    migration.NewHandler(migrationService),
+		MigrationJobs: migrationjob.NewHandler(migrationjob.NewStore(pool), checker),
 	})
 
 	srv := &http.Server{
