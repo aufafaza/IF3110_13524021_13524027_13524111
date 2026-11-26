@@ -26,6 +26,7 @@ const (
 
 type ReviewDecision struct {
 	GroupID      int64      `json:"group_id"`
+	GroupName    string     `json:"group_name"`
 	LeaderUserID int64      `json:"leader_user_id"`
 	Decision     string     `json:"decision,omitempty"`
 	Comment      string     `json:"comment,omitempty"`
@@ -69,6 +70,7 @@ type ApprovalRepository interface {
 	SubmitReview(ctx context.Context, p SubmitReviewParams) (Review, error)
 	GetReview(ctx context.Context, requestID string) (Review, error)
 	ListReviews(ctx context.Context, databaseID int64) ([]Review, error)
+	FindByRevision(ctx context.Context, migrationID int64, revision, operation string) (Review, error)
 	DecideReview(ctx context.Context, requestID string, actorID, groupID int64, revision, decision, comment string) (Review, error)
 	ApprovedReview(ctx context.Context, migrationID int64, revision, operation string) (Review, error)
 }
@@ -189,7 +191,7 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 		if err := tx.Commit(ctx); err != nil {
 			return Review{}, err
 		}
-		return r.findByRevision(ctx, p.MigrationID, p.Revision, op)
+		return r.FindByRevision(ctx, p.MigrationID, p.Revision, op)
 	}
 	for _, req := range requirements {
 		if _, err := tx.Exec(ctx, `INSERT INTO migration_review_decisions(request_id,group_id,leader_user_id) VALUES($1,$2,$3)`, requestID, req.groupID, req.leaderID); err != nil {
@@ -202,7 +204,7 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 	return r.GetReview(ctx, requestID)
 }
 
-func (r *PostgresApprovalRepository) findByRevision(ctx context.Context, migrationID int64, revision, operation string) (Review, error) {
+func (r *PostgresApprovalRepository) FindByRevision(ctx context.Context, migrationID int64, revision, operation string) (Review, error) {
 	var requestID string
 	err := r.pool.QueryRow(ctx, `SELECT request_id FROM migration_review_requests WHERE migration_id=$1 AND revision=$2 AND operation=$3`, migrationID, revision, operation).Scan(&requestID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -236,7 +238,9 @@ func (r *PostgresApprovalRepository) GetReview(ctx context.Context, requestID st
 }
 
 func (r *PostgresApprovalRepository) decisions(ctx context.Context, requestID string) ([]ReviewDecision, error) {
-	rows, err := r.pool.Query(ctx, `SELECT group_id,leader_user_id,COALESCE(decision,''),comment,decided_at FROM migration_review_decisions WHERE request_id=$1 ORDER BY group_id`, requestID)
+	rows, err := r.pool.Query(ctx, `SELECT d.group_id,g.name,d.leader_user_id,COALESCE(d.decision,''),d.comment,d.decided_at
+		FROM migration_review_decisions d JOIN groups g ON g.id=d.group_id
+		WHERE d.request_id=$1 ORDER BY g.name,d.group_id`, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("migration: list review decisions: %w", err)
 	}
@@ -244,7 +248,7 @@ func (r *PostgresApprovalRepository) decisions(ctx context.Context, requestID st
 	var out []ReviewDecision
 	for rows.Next() {
 		var d ReviewDecision
-		if err := rows.Scan(&d.GroupID, &d.LeaderUserID, &d.Decision, &d.Comment, &d.DecidedAt); err != nil {
+		if err := rows.Scan(&d.GroupID, &d.GroupName, &d.LeaderUserID, &d.Decision, &d.Comment, &d.DecidedAt); err != nil {
 			return nil, fmt.Errorf("migration: scan review decision: %w", err)
 		}
 		out = append(out, d)
@@ -434,7 +438,7 @@ func CurrentRevision(m Migration) string {
 	return Revision(m.Title, def)
 }
 
-func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string) (Review, error) {
+func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string, revision int) (Review, error) {
 	if s.approvals == nil {
 		return Review{}, ErrApprovalsUnavailable
 	}
@@ -448,6 +452,9 @@ func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migratio
 	m, err := s.repo.GetByID(ctx, databaseID, migrationID)
 	if err != nil {
 		return Review{}, err
+	}
+	if revision != 0 && revision != m.Revision {
+		return Review{}, ErrRevisionMismatch
 	}
 	if m.Status != StatusDraft {
 		return Review{}, ErrNotDraft
@@ -467,6 +474,28 @@ func (s *Service) GetReview(ctx context.Context, userID int64, requestID string)
 		return Review{}, err
 	}
 	return review, nil
+}
+
+// CurrentApplyReview returns the review of the current definition, if any.
+func (s *Service) CurrentApplyReview(ctx context.Context, userID, databaseID, migrationID int64, revision int) (*Review, error) {
+	if s.approvals == nil {
+		return nil, ErrApprovalsUnavailable
+	}
+	m, err := s.GetDetail(ctx, userID, databaseID, migrationID)
+	if err != nil {
+		return nil, err
+	}
+	if revision != 0 && revision != m.Revision {
+		return nil, ErrRevisionMismatch
+	}
+	review, err := s.approvals.FindByRevision(ctx, m.ID, CurrentRevision(m), string(OpApply))
+	if errors.Is(err, ErrReviewNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &review, nil
 }
 
 func (s *Service) ListReviews(ctx context.Context, userID, databaseID int64) ([]Review, error) {

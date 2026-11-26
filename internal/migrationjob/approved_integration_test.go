@@ -250,6 +250,18 @@ func TestApprovedJobRedispatchAndRevisionRace(t *testing.T) {
 	if err != nil || current.Revision != draft.Revision+1 || current.FirstExecutedAt != nil {
 		t.Fatalf("the edited revision should remain unlocked: %+v (%v)", current, err)
 	}
+	reviewURL := fmt.Sprintf("/api/databases/%d/migrations/%d/review", e.dbID, draft.ID)
+	e.request(t, e.actorID, "GET", fmt.Sprintf("%s?revision=%d", reviewURL, draft.Revision), "", http.StatusConflict, nil)
+	oldRevision := fmt.Sprintf(`{"operation":"apply","revision":%d}`, draft.Revision)
+	e.request(t, e.actorID, "POST", reviewURL, oldRevision, http.StatusConflict, nil)
+	var latest struct {
+		Review *migration.Review `json:"review"`
+	}
+	e.request(t, e.actorID, "GET", fmt.Sprintf("%s?revision=%d", reviewURL, current.Revision), "", http.StatusOK, &latest)
+	if latest.Review != nil {
+		t.Fatalf("the prior approval should not apply to the edited draft: %+v", latest.Review)
+	}
+
 }
 
 func TestApprovedJobRechecksCurrentGroupGrants(t *testing.T) {
@@ -278,4 +290,72 @@ func TestApprovedJobRechecksCurrentGroupGrants(t *testing.T) {
 		t.Fatalf("expected rejection after the group requirements changed: %+v", failed)
 	}
 	e.effect(t, 0)
+}
+
+func TestApprovedApplyRecoversAfterCommitWithProductionHistory(t *testing.T) {
+	e := setupReviewTest(t)
+	draft, review := e.draftAndReview(t)
+	e.decision(t, review.RequestID, e.view, http.StatusOK, nil)
+	e.decision(t, review.RequestID, e.edit, http.StatusOK, &review)
+
+	var queued migration.QueueJob
+	e.request(t, e.actorID, "POST", "/api/migration-reviews/"+review.RequestID+"/enqueue", "", http.StatusAccepted, &queued)
+	var current struct {
+		Review *migration.Review `json:"review"`
+	}
+	reviewURL := fmt.Sprintf("/api/databases/%d/migrations/%d/review?revision=%d", e.dbID, draft.ID, draft.Revision)
+	e.request(t, e.leader, "GET", reviewURL, "", http.StatusOK, &current)
+	if current.Review == nil || current.Review.JobID == nil || *current.Review.JobID != queued.ID ||
+		len(current.Review.Decisions) != 2 || current.Review.Decisions[0].GroupName == "" {
+		t.Fatalf("current review does not expose the queued job and group names: %+v", current.Review)
+	}
+
+	crashWorkerWithServices(t, e.dbID, "commit", "production")
+	crashed := e.job(t, queued.ID, Running, 1)
+	e.effect(t, 1)
+
+	var attemptID string
+	err := e.target.QueryRow(t.Context(), `SELECT attempt_id::text FROM migration_worker.completions
+		WHERE execution_id=$1::uuid`, crashed.ExecutionID).Scan(&attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHistory := func(want int) {
+		t.Helper()
+		entries, err := e.service.ListAttemptHistory(t.Context(), e.actorID, e.dbID, false)
+		if err != nil || len(entries) != want {
+			t.Fatalf("production history = %+v, want %d entries: %v", entries, want, err)
+		}
+		if want > 0 {
+			entry := entries[0]
+			if entry.ExecutionID != crashed.ExecutionID || entry.AttemptID != attemptID ||
+				entry.Status != migration.AttemptSucceeded || entry.Revision != draft.Revision ||
+				entry.ActorID != e.actorID || entry.ExecutedSQL != incrementSQL {
+				t.Fatalf("recovered history did not match the committed attempt: %+v", entry)
+			}
+		}
+	}
+	assertHistory(0)
+
+	e.expireClaim(t, queued.ID)
+	provider := &testutil.StaticProvider{Pools: map[int64]*pgxpool.Pool{e.dbID: e.target}}
+	step(t, NewApprovedWorker(e.store, provider, e.service))
+	e.job(t, queued.ID, Reporting, 1)
+	crashWorkerWithServices(t, e.dbID, "history", "production")
+	e.job(t, queued.ID, Reporting, 1)
+	assertHistory(1)
+
+	e.expireClaim(t, queued.ID)
+	step(t, NewApprovedWorker(e.store, provider, e.service))
+	finished := e.job(t, queued.ID, Succeeded, 1)
+	if finished.ExecutionID != crashed.ExecutionID {
+		t.Fatalf("execution identity changed after restart: %+v", finished)
+	}
+	e.effect(t, 1)
+	assertHistory(1)
+	applied, err := e.repo.GetByID(t.Context(), e.dbID, draft.ID)
+	if err != nil || applied.Status != migration.StatusApplied || applied.Version == nil || *applied.Version != 1 ||
+		applied.ExecutedAt == nil || applied.ExecutedBy == nil || *applied.ExecutedBy != e.actorID {
+		t.Fatalf("migration list/detail projection did not reflect the successful job: %+v (%v)", applied, err)
+	}
 }

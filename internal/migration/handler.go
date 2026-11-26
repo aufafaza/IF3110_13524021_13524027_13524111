@@ -224,6 +224,31 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, executed)
 }
 
+func (h *Handler) handleCurrentApplyReview(w http.ResponseWriter, r *http.Request) {
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
+	if !ok {
+		return
+	}
+	var revision int
+	if raw := r.URL.Query().Get("revision"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			writeError(w, errInvalidRequest)
+			return
+		}
+		revision = value
+	}
+	review, err := h.service.CurrentApplyReview(r.Context(), user.ID, dbID, id, revision)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, struct {
+		Review *Review `json:"review"`
+	}{review})
+}
+
 func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
@@ -231,11 +256,16 @@ func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Operation string `json:"operation"`
+		Revision  int    `json:"revision"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation)
+	if in.Revision < 0 {
+		writeError(w, errInvalidRequest)
+		return
+	}
+	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation, in.Revision)
 	if err != nil {
 		writeError(w, err)
 		return

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/platformdb"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/testutil"
 )
@@ -202,10 +203,15 @@ func step(t *testing.T, w *Worker) {
 
 func crashWorker(t *testing.T, databaseID int64, at string) {
 	t.Helper()
+	crashWorkerWithServices(t, databaseID, at, "fixtures")
+}
+
+func crashWorkerWithServices(t *testing.T, databaseID int64, at, services string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkerCrashProcess$")
-	cmd.Env = append(os.Environ(), "MIGRATION_TEST_CRASH_AT="+at, fmt.Sprintf("MIGRATION_TEST_DB_ID=%d", databaseID))
+	cmd.Env = append(os.Environ(), "MIGRATION_TEST_CRASH_AT="+at, "MIGRATION_TEST_SERVICES="+services, fmt.Sprintf("MIGRATION_TEST_DB_ID=%d", databaseID))
 	output, err := cmd.CombinedOutput()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 42 {
@@ -228,6 +234,13 @@ func TestWorkerCrashProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := e.worker()
+	if os.Getenv("MIGRATION_TEST_SERVICES") == "production" {
+		reviews := migration.NewPostgresApprovalRepository(platform)
+		repo := migration.NewPostgresRepository(platform)
+		service := migration.NewServiceWithApprovals(repo, nil, access.NewPostgresChecker(platform), reviews)
+		provider := &testutil.StaticProvider{Pools: map[int64]*pgxpool.Pool{e.dbID: e.target}}
+		w = NewApprovedWorker(e.store, provider, service)
+	}
 	crash := func() { os.Exit(42) }
 	switch at {
 	case "claim":

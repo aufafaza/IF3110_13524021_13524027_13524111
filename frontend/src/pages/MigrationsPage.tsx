@@ -1,9 +1,8 @@
-import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { getMigration, listMigrations, migrationPost, type Migration } from '@/api/migrations'
-import { useAuth } from '@/auth/useAuth'
+import { getMigration, listMigrations } from '@/api/migrations'
 import { useRequest } from '@/api/useRequest'
 import { RequestFeedback } from '@/components/RequestFeedback'
+import { MigrationApply } from './MigrationApply'
 
 export function MigrationsPage() {
   const { dbID, migrationID } = useParams()
@@ -50,37 +49,15 @@ function MigrationList({ dbID }: { dbID: string }) {
 }
 
 function MigrationDetail({ dbID, migrationID }: { dbID: string; migrationID: string }) {
-  const { state } = useAuth()
-  const [result, setResult] = useState<Migration>()
-  const [running, setRunning] = useState(false)
-  const [error, setError] = useState('')
   const request = useRequest(getMigration, dbID, migrationID)
   if (request.status !== 'ready') return <RequestFeedback request={request} loading="Loading migration…" />
-  const migration = result ?? request.data
-
-  async function execute() {
-    if (running || state.status !== 'ready' || !window.confirm('Run this SQL on the selected database?')) return
-    setRunning(true)
-    setError('')
-    try {
-      setResult(await migrationPost<Migration>(dbID, migrationID, state.session.csrf_token, { confirm: true }, true))
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Could not run the migration.')
-      try {
-        setResult(await getMigration(dbID, migrationID, new AbortController().signal))
-      } catch {
-        // Keep the execution error visible if the status refresh also fails.
-      }
-    } finally {
-      setRunning(false)
-    }
-  }
+  const migration = request.data
 
   return (
     <>
       <h1>{migration.title}</h1>
       <dl className="migration-summary">
-        <dt>Status</dt><dd>{migration.status}</dd>
+        <dt>Revision</dt><dd>{migration.revision}</dd>
         {migration.version != null && <><dt>Version</dt><dd>{migration.version}</dd></>}
         <dt>Created</dt><dd><time dateTime={migration.created_at}>{new Date(migration.created_at).toLocaleString()}</time></dd>
         {migration.executed_at && (
@@ -88,17 +65,9 @@ function MigrationDetail({ dbID, migrationID }: { dbID: string; migrationID: str
         )}
       </dl>
       {migration.error_message && <p className="feedback feedback-error">{migration.error_message}</p>}
-      {error && <p className="feedback feedback-error" role="alert">{error}</p>}
-      {request.data.can_edit && migration.status === 'draft' && (
-        <div className="action-row">
-          {!running && <Link to={`/databases/${dbID}/migrations/${migrationID}/edit`}>Edit draft</Link>}
-          <button type="button" disabled={running} onClick={() => void execute()}>
-            {running ? 'Running…' : 'Run migration'}
-          </button>
-        </div>
-      )}
       <h2>SQL</h2>
       <pre className="sql-view" role="region" aria-label="Migration SQL" tabIndex={0}><code>{migration.sql}</code></pre>
+      <MigrationApply dbID={dbID} migrationID={migrationID} migration={migration} />
     </>
   )
 }
