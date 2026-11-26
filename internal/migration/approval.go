@@ -410,7 +410,16 @@ func (r *PostgresApprovalRepository) verifyCurrentAuthorization(ctx context.Cont
 	return nil
 }
 
-func CurrentRevision(m Migration) string { return Revision(m.Title, m.SQL) }
+func CurrentRevision(m Migration) string {
+	def := m.SQL + "\x00"
+	switch {
+	case m.DownSQL != nil:
+		def += "down:" + *m.DownSQL
+	case m.IrreversibleReason != nil:
+		def += "irreversible:" + *m.IrreversibleReason
+	}
+	return Revision(m.Title, def)
+}
 
 type ApprovalService interface {
 	SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string) (Review, error)
