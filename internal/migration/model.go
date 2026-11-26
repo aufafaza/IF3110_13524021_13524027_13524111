@@ -66,4 +66,7 @@ var (
 	ErrImmutable           = errors.New("migration: definition is immutable after first execution")
 	ErrNothingToForward    = errors.New("migration: nothing to forward in linear order")
 	ErrInvalidDefinition   = errors.New("migration: provide either down SQL or an irreversible reason")
+	ErrRevisionMismatch    = errors.New("migration: revision does not match the approved revision")
+	ErrInvalidAttempt      = errors.New("migration: invalid attempt result")
+	ErrHistoryUnavailable  = errors.New("migration: history repository is not configured")
 )

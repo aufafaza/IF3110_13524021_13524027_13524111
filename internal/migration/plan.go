@@ -1,5 +1,7 @@
 package migration
 
+import "strings"
+
 type Plan struct {
 	Operation             Operation `json:"operation"`
 	MigrationID           int64     `json:"migration_id"`
@@ -80,4 +82,24 @@ func PlanForward(m Migration, entries []HistoryEntry) (Plan, error) {
 		return Plan{}, ErrNotLatestActive
 	}
 	return Plan{Operation: OpForward, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL}, nil
+}
+
+// PlanApplyFor: apply hanya untuk migrasi yang belum pernah berhasil.
+// Retry attempt gagal tetap lewat jalur ini (TODO: PIC 1 memberi attempt ID baru).
+func PlanApplyFor(m Migration, entries []HistoryEntry) (Plan, error) {
+	chain, err := ActiveChain(entries)
+	if err != nil {
+		return Plan{}, err
+	}
+	for _, c := range chain {
+		if c.MigrationID == m.ID {
+			return Plan{}, ErrAlreadyApplied
+		}
+	}
+	for _, e := range DedupeAttempts(entries) {
+		if e.MigrationID == m.ID && e.Status == AttemptSucceeded && e.Operation != OpRollback {
+			return Plan{}, ErrNotDraft
+		}
+	}
+	return PlanApply(m), nil
 }

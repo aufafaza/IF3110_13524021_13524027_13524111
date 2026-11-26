@@ -64,3 +64,22 @@ func TestValidateDefinition(t *testing.T) {
 		t.Fatalf("reason only: %v", err)
 	}
 }
+
+func TestPlanApplyFor(t *testing.T) {
+	m := migration.Migration{ID: 1, Revision: 1, SQL: "CREATE TABLE a (id int);"}
+	active := []migration.HistoryEntry{entry(1, "E1", "a1", migration.OpApply, migration.AttemptSucceeded, "")}
+	if _, err := migration.PlanApplyFor(m, active); !errors.Is(err, migration.ErrAlreadyApplied) {
+		t.Fatalf("active: %v", err)
+	}
+	failedOnly := []migration.HistoryEntry{entry(1, "E1", "a1", migration.OpApply, migration.AttemptFailed, "")}
+	if _, err := migration.PlanApplyFor(m, failedOnly); err != nil {
+		t.Fatalf("retry after failure should be allowed: %v", err)
+	}
+	rolledBack := []migration.HistoryEntry{
+		entry(1, "E1", "a1", migration.OpApply, migration.AttemptSucceeded, ""),
+		entry(1, "E2", "a2", migration.OpRollback, migration.AttemptSucceeded, "E1"),
+	}
+	if _, err := migration.PlanApplyFor(m, rolledBack); !errors.Is(err, migration.ErrNotDraft) {
+		t.Fatalf("rolled back must use forward: %v", err)
+	}
+}

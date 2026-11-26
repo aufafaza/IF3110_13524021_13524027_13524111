@@ -144,6 +144,10 @@ func (r *PostgresRepository) UpdateDraft(ctx context.Context, params UpdateDraft
 		 RETURNING id`,
 		params.Title, params.SQL, params.DownSQL, params.IrreversibleReason, params.ID, params.DatabaseID,
 	).Scan(&id)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23000" {
+		return Migration{}, ErrImmutable
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Migration{}, r.classifyNonDraftError(ctx, params.DatabaseID, params.ID)
 	}
