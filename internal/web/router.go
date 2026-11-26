@@ -11,6 +11,7 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migrationjob"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/static"

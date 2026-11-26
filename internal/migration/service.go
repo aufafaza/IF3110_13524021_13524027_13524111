@@ -19,10 +19,11 @@ type PreviewResult struct {
 }
 
 type Service struct {
-	repo     Repository
-	runner   *Runner
-	checker  access.DatabaseChecker
-	analyzer PlanAnalyzer
+	repo      Repository
+	runner    *Runner
+	checker   access.DatabaseChecker
+	analyzer  PlanAnalyzer
+	approvals ApprovalRepository
 }
 
 func NewService(repo Repository, runner *Runner, checker access.DatabaseChecker) *Service {
@@ -38,6 +39,14 @@ func NewService(repo Repository, runner *Runner, checker access.DatabaseChecker)
 		checker:  checker,
 		analyzer: analyzer,
 	}
+}
+
+// NewServiceWithApprovals enables the review/queue gate while keeping the
+// original constructor useful for isolated migration tests and local tools.
+func NewServiceWithApprovals(repo Repository, runner *Runner, checker access.DatabaseChecker, approvals ApprovalRepository) *Service {
+	s := NewService(repo, runner, checker)
+	s.approvals = approvals
+	return s
 }
 
 func (s *Service) UserLevel(ctx context.Context, userID, databaseID int64) (access.Level, error) {
@@ -173,8 +182,25 @@ func (s *Service) ExplainMigration(ctx context.Context, userID, databaseID, migr
 }
 
 func (s *Service) Execute(ctx context.Context, userID, databaseID, migrationID int64) (Migration, error) {
+	return s.ExecuteOperation(ctx, userID, databaseID, migrationID, "apply")
+}
+
+func (s *Service) ExecuteOperation(ctx context.Context, userID, databaseID, migrationID int64, operation string) (Migration, error) {
 	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Migration{}, err
+	}
+	if s.approvals != nil {
+		m, err := s.repo.GetByID(ctx, databaseID, migrationID)
+		if err != nil {
+			return Migration{}, err
+		}
+		op, err := normalizeOperation(operation)
+		if err != nil {
+			return Migration{}, err
+		}
+		if _, err := s.approvals.ApprovedReview(ctx, migrationID, CurrentRevision(m), op); err != nil {
+			return Migration{}, err
+		}
 	}
 	return s.runner.Run(ctx, userID, databaseID, migrationID)
 }

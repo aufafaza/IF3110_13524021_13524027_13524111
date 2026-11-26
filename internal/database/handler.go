@@ -2,8 +2,11 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -105,6 +108,245 @@ func (h *Handler) fail(w http.ResponseWriter, op string, err error) {
 	}
 	log.Printf("databases: %s: %v", op, err)
 	http.Error(w, "internal error", http.StatusInternalServerError)
+}
+
+func (h *Handler) RegisterAPIRoutes(mux *http.ServeMux, guard *access.Guard) {
+	admin := guard.RequireAdmin
+	login := guard.RequireLogin
+	mux.Handle("GET /api/admin/databases", admin(http.HandlerFunc(h.apiAdminDatabases)))
+	mux.Handle("POST /api/admin/databases", admin(http.HandlerFunc(h.apiAdminCreateDatabase)))
+	mux.Handle("GET /api/admin/databases/{id}", admin(http.HandlerFunc(h.apiAdminDatabase)))
+	mux.Handle("PUT /api/admin/databases/{id}", admin(http.HandlerFunc(h.apiAdminUpdateDatabase)))
+	mux.Handle("DELETE /api/admin/databases/{id}", admin(http.HandlerFunc(h.apiAdminDeleteDatabase)))
+	mux.Handle("GET /api/databases/{dbID}/schema", login(http.HandlerFunc(h.apiSchema)))
+	mux.Handle("GET /api/databases/{dbID}/table", login(http.HandlerFunc(h.apiTable)))
+}
+
+func databaseAPIJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func databaseAPIError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	message := "internal error"
+	switch {
+	case errors.Is(err, ErrDatabaseNotFound), errors.Is(err, ErrTableNotFound):
+		status, message = http.StatusNotFound, "not found"
+	case errors.Is(err, ErrInvalidInput), errors.Is(err, ErrNameTaken):
+		status, message = http.StatusBadRequest, err.Error()
+	}
+	if status == http.StatusInternalServerError {
+		log.Printf("database api: %v", err)
+	}
+	databaseAPIJSON(w, status, map[string]string{"error": message})
+}
+
+func readDatabaseAPIJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" {
+		databaseAPIJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
+		return false
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return false
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return false
+	}
+	return true
+}
+
+type databaseAPIView struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Host      string    `json:"host"`
+	Port      int       `json:"port"`
+	DBName    string    `json:"db_name"`
+	DBUser    string    `json:"db_user"`
+	SSLMode   string    `json:"sslmode"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func publicDatabase(d Database) databaseAPIView {
+	return databaseAPIView{d.ID, d.Name, d.Host, d.Port, d.DBName, d.DBUser, d.SSLMode, d.CreatedAt}
+}
+
+func (h *Handler) apiAdminDatabases(w http.ResponseWriter, r *http.Request) {
+	dbs, err := h.reg.List(r.Context())
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	out := make([]databaseAPIView, 0, len(dbs))
+	for _, d := range dbs {
+		out = append(out, publicDatabase(d))
+	}
+	databaseAPIJSON(w, http.StatusOK, map[string]any{"databases": out})
+}
+
+func (h *Handler) apiAdminCreateDatabase(w http.ResponseWriter, r *http.Request) {
+	var in DatabaseInput
+	if !readDatabaseAPIJSON(w, r, &in) {
+		return
+	}
+	d, err := h.reg.Create(r.Context(), in)
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	databaseAPIJSON(w, http.StatusCreated, publicDatabase(d))
+}
+
+func (h *Handler) apiAdminDatabase(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r, "id")
+	if !ok {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database id"})
+		return
+	}
+	d, err := h.reg.Get(r.Context(), id)
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	databaseAPIJSON(w, http.StatusOK, publicDatabase(d))
+}
+
+func (h *Handler) apiAdminUpdateDatabase(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r, "id")
+	if !ok {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database id"})
+		return
+	}
+	var in DatabaseInput
+	if !readDatabaseAPIJSON(w, r, &in) {
+		return
+	}
+	if err := h.reg.Update(r.Context(), id, in); err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	d, err := h.reg.Get(r.Context(), id)
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	databaseAPIJSON(w, http.StatusOK, publicDatabase(d))
+}
+
+func (h *Handler) apiAdminDeleteDatabase(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r, "id")
+	if !ok {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database id"})
+		return
+	}
+	if err := h.reg.Delete(r.Context(), id); err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	databaseAPIJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (h *Handler) apiSelect(w http.ResponseWriter, r *http.Request) {
+	user, ok := access.UserFromContext(r.Context())
+	if !ok {
+		databaseAPIJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+		return
+	}
+	dbs, err := h.reg.List(r.Context())
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	type selected struct {
+		ID    int64        `json:"id"`
+		Name  string       `json:"name"`
+		Level access.Level `json:"level"`
+	}
+	out := make([]selected, 0)
+	for _, d := range dbs {
+		level, err := h.checker.EffectiveLevel(r.Context(), user.ID, d.ID)
+		if err != nil {
+			databaseAPIError(w, err)
+			return
+		}
+		if level > access.LevelNone {
+			out = append(out, selected{d.ID, d.Name, level})
+		}
+	}
+	databaseAPIJSON(w, http.StatusOK, map[string]any{"databases": out})
+}
+
+func (h *Handler) apiSchema(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r, access.DatabaseIDParam)
+	if !ok {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database id"})
+		return
+	}
+	user, _ := access.UserFromContext(r.Context())
+	level, err := h.checker.EffectiveLevel(r.Context(), user.ID, id)
+	if err != nil || level < access.LevelView {
+		if err != nil {
+			databaseAPIError(w, err)
+		} else {
+			databaseAPIJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		}
+		return
+	}
+	tables, err := h.viewer.Tables(r.Context(), id)
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	if tables == nil {
+		tables = []Table{}
+	}
+	databaseAPIJSON(w, http.StatusOK, map[string]any{"database_id": id, "tables": tables})
+}
+
+func (h *Handler) apiTable(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r, access.DatabaseIDParam)
+	if !ok {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database id"})
+		return
+	}
+	user, _ := access.UserFromContext(r.Context())
+	level, err := h.checker.EffectiveLevel(r.Context(), user.ID, id)
+	if err != nil || level < access.LevelView {
+		if err != nil {
+			databaseAPIError(w, err)
+		} else {
+			databaseAPIJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		}
+		return
+	}
+	schema, table := r.URL.Query().Get("schema"), r.URL.Query().Get("table")
+	if schema == "" || table == "" {
+		databaseAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "schema and table are required"})
+		return
+	}
+	if r.URL.Query().Get("data") == "true" {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		data, err := h.viewer.Rows(r.Context(), id, schema, table, page)
+		if err != nil {
+			databaseAPIError(w, err)
+			return
+		}
+		databaseAPIJSON(w, http.StatusOK, data)
+		return
+	}
+	info, err := h.viewer.TableInfo(r.Context(), id, schema, table)
+	if err != nil {
+		databaseAPIError(w, err)
+		return
+	}
+	databaseAPIJSON(w, http.StatusOK, info)
 }
 
 func inputMessage(err error) (string, bool) {

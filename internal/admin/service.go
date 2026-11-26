@@ -32,6 +32,10 @@ type Service struct {
 	sessions SessionRevoker
 }
 
+type LeaderStore interface {
+	SetGroupLeader(ctx context.Context, groupID, userID int64) error
+}
+
 func NewService(store Store, hasher auth.PasswordHasher, sessions SessionRevoker) *Service {
 	return &Service{store: store, hasher: hasher, sessions: sessions}
 }
@@ -134,6 +138,17 @@ func (s *Service) ListGroups(ctx context.Context) ([]Group, error) {
 
 func (s *Service) GetGroup(ctx context.Context, groupID int64) (Group, error) {
 	return s.store.GetGroup(ctx, groupID)
+}
+
+func (s *Service) SetGroupLeader(ctx context.Context, groupID, userID int64) error {
+	leaderStore, ok := s.store.(LeaderStore)
+	if !ok {
+		return fmt.Errorf("admin: group leader storage is not configured")
+	}
+	if groupID <= 0 || userID <= 0 {
+		return invalid("A group and active leader are required.")
+	}
+	return leaderStore.SetGroupLeader(ctx, groupID, userID)
 }
 
 func (s *Service) CreateGroup(ctx context.Context, name string) error {

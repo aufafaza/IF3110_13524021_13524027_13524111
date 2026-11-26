@@ -10,7 +10,10 @@ import (
 var ErrTableNotFound = errors.New("dbmanager: table not found")
 
 type (
-	Table  struct{ Schema, Name string }
+	Table struct {
+		Schema string `json:"schema"`
+		Name   string `json:"name"`
+	}
 	Column struct {
 		Name     string  `json:"name"`
 		Type     string  `json:"type"`

@@ -24,4 +24,5 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, guard *access.Guard) {
 	adminRoute("POST /admin/groups/{id}/members/{userID}/remove", h.RemoveMember)
 	adminRoute("POST /admin/groups/{id}/grants", h.SetGrant)
 	adminRoute("POST /admin/groups/{id}/grants/{dbID}/remove", h.RemoveGrant)
+	h.RegisterAPIRoutes(mux, guard)
 }
