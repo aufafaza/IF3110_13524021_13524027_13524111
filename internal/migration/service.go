@@ -270,9 +270,6 @@ func (s *Service) UpdateDraftWithDefinition(ctx context.Context, userID, databas
 	})
 }
 
-// PlanOperation dipakai SPA/approval (preview rencana) dan PIC 1 (revalidasi di
-// bawah lock). revision = 0 berarti tidak diperiksa; selain itu harus sama
-// dengan revisi yang disetujui.
 func (s *Service) PlanOperation(ctx context.Context, userID, databaseID, migrationID int64, op Operation, revision int) (Plan, error) {
 	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Plan{}, err
@@ -287,7 +284,11 @@ func (s *Service) PlanOperation(ctx context.Context, userID, databaseID, migrati
 	if revision != 0 && revision != m.Revision {
 		return Plan{}, ErrRevisionMismatch
 	}
-	entries, err := s.history.ListHistoryEntries(ctx, databaseID)
+	return s.planForDefinition(ctx, m, op)
+}
+
+func (s *Service) planForDefinition(ctx context.Context, m Migration, op Operation) (Plan, error) {
+	entries, err := s.history.ListHistoryEntries(ctx, m.DatabaseID)
 	if err != nil {
 		return Plan{}, err
 	}

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
@@ -44,32 +43,33 @@ type Review struct {
 	CreatedAt   time.Time        `json:"created_at"`
 	DecidedAt   *time.Time       `json:"decided_at,omitempty"`
 	EnqueuedAt  *time.Time       `json:"enqueued_at,omitempty"`
+	JobID       *int64           `json:"job_id,omitempty"`
 	Decisions   []ReviewDecision `json:"decisions"`
 }
 
 type QueueJob struct {
-	ID        int64      `json:"id"`
-	RequestID string     `json:"request_id"`
-	Status    string     `json:"status"`
-	Attempts  int        `json:"attempts"`
-	CreatedAt time.Time  `json:"created_at"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
+	ID         int64     `json:"id"`
+	RequestID  string    `json:"request_id"`
+	Status     string    `json:"status"`
+	Attempts   int       `json:"attempts"`
+	CreatedAt  time.Time `json:"created_at"`
+	DatabaseID int64     `json:"database_id"`
 }
 
 type SubmitReviewParams struct {
-	MigrationID int64
-	DatabaseID  int64
-	Revision    string
-	Operation   string
-	RequestedBy int64
+	MigrationID        int64
+	DatabaseID         int64
+	Revision           string
+	Operation          string
+	RequestedBy        int64
+	DefinitionRevision int
 }
 
 type ApprovalRepository interface {
 	SubmitReview(ctx context.Context, p SubmitReviewParams) (Review, error)
 	GetReview(ctx context.Context, requestID string) (Review, error)
 	ListReviews(ctx context.Context, databaseID int64) ([]Review, error)
-	DecideReview(ctx context.Context, requestID string, actorID int64, revision, decision, comment string) (Review, error)
-	EnqueueApproved(ctx context.Context, requestID string) (QueueJob, error)
+	DecideReview(ctx context.Context, requestID string, actorID, groupID int64, revision, decision, comment string) (Review, error)
 	ApprovedReview(ctx context.Context, migrationID int64, revision, operation string) (Review, error)
 }
 
@@ -83,6 +83,8 @@ var (
 	ErrApprovalRequired     = errors.New("migration: an approved review is required")
 	ErrInvalidOperation     = errors.New("migration: invalid review operation")
 	ErrQueueNotApproved     = errors.New("migration: only an approved review can be queued")
+	ErrReviewGroupRequired  = errors.New("migration: group_id is required when deciding for multiple groups")
+	ErrInvalidDecision      = errors.New("migration: decision must be approved or rejected")
 )
 
 func Revision(title, sql string) string {
@@ -131,12 +133,15 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 	defer tx.Rollback(ctx)
 
 	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM migrations WHERE id=$1 AND database_id=$2 FOR SHARE`, p.MigrationID, p.DatabaseID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+	var definitionRevision int
+	if err := tx.QueryRow(ctx, `SELECT status, revision FROM migrations WHERE id=$1 AND database_id=$2 FOR SHARE`, p.MigrationID, p.DatabaseID).Scan(&status, &definitionRevision); errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrNotFound
 	} else if err != nil {
 		return Review{}, fmt.Errorf("migration: review migration: %w", err)
 	} else if status != string(StatusDraft) {
 		return Review{}, ErrNotDraft
+	} else if definitionRevision != p.DefinitionRevision {
+		return Review{}, ErrRevisionChanged
 	}
 
 	type requirement struct {
@@ -173,18 +178,18 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 	}
 
 	requestID := newRequestID()
-	_, err = tx.Exec(ctx, `INSERT INTO migration_review_requests
+	tag, err := tx.Exec(ctx, `INSERT INTO migration_review_requests
 		(request_id,migration_id,revision,operation,requested_by)
-		VALUES ($1,$2,$3,$4,$5)`, requestID, p.MigrationID, p.Revision, op, p.RequestedBy)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		VALUES ($1,$2,$3,$4,$5) ON CONFLICT (migration_id,revision,operation) DO NOTHING`,
+		requestID, p.MigrationID, p.Revision, op, p.RequestedBy)
+	if err != nil {
+		return Review{}, fmt.Errorf("migration: create review: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
 		if err := tx.Commit(ctx); err != nil {
 			return Review{}, err
 		}
 		return r.findByRevision(ctx, p.MigrationID, p.Revision, op)
-	}
-	if err != nil {
-		return Review{}, fmt.Errorf("migration: create review: %w", err)
 	}
 	for _, req := range requirements {
 		if _, err := tx.Exec(ctx, `INSERT INTO migration_review_decisions(request_id,group_id,leader_user_id) VALUES($1,$2,$3)`, requestID, req.groupID, req.leaderID); err != nil {
@@ -209,12 +214,13 @@ func (r *PostgresApprovalRepository) findByRevision(ctx context.Context, migrati
 	return r.GetReview(ctx, requestID)
 }
 
-const reviewColumns = `request_id,migration_id,m.database_id,revision,operation,requested_by,status,created_at,decided_at,enqueued_at`
+const reviewColumns = `q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,
+	q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id`
 
 func (r *PostgresApprovalRepository) GetReview(ctx context.Context, requestID string) (Review, error) {
 	var out Review
 	var status string
-	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt)
+	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrReviewNotFound
 	}
@@ -274,10 +280,10 @@ func (r *PostgresApprovalRepository) ListReviews(ctx context.Context, databaseID
 	return out, nil
 }
 
-func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID string, actorID int64, revision, decision, comment string) (Review, error) {
+func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID string, actorID, groupID int64, revision, decision, comment string) (Review, error) {
 	decision = strings.ToLower(strings.TrimSpace(decision))
 	if decision != "approved" && decision != "rejected" {
-		return Review{}, errors.New("migration: decision must be approved or rejected")
+		return Review{}, ErrInvalidDecision
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -296,21 +302,45 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 	if status != string(ReviewPending) {
 		return Review{}, ErrReviewClosed
 	}
-	var groupID int64
-	err = tx.QueryRow(ctx, `SELECT d.group_id
+	// Lock the reviewed definition until the decision commits. A concurrent
+	// edit can revoke the approval afterward, but cannot race this check.
+	var definition Migration
+	err = tx.QueryRow(ctx, `SELECT m.title,m.sql,m.down_sql,m.irreversible_reason
+		FROM migrations m JOIN migration_review_requests q ON q.migration_id=m.id
+		WHERE q.request_id=$1 FOR SHARE OF m`, requestID).
+		Scan(&definition.Title, &definition.SQL, &definition.DownSQL, &definition.IrreversibleReason)
+	if err != nil {
+		return Review{}, err
+	}
+	if CurrentRevision(definition) != revision {
+		return Review{}, ErrRevisionChanged
+	}
+	rows, err := tx.Query(ctx, `SELECT d.group_id
 		FROM migration_review_decisions d
 		JOIN migration_review_requests q ON q.request_id=d.request_id
 		JOIN migrations m ON m.id=q.migration_id
 		JOIN groups g ON g.id=d.group_id
-		WHERE d.request_id=$1 AND g.leader_user_id=$2
-		  AND EXISTS (SELECT 1 FROM group_db_access a WHERE a.group_id=d.group_id AND a.database_id=m.database_id)`, requestID, actorID).Scan(&groupID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Review{}, ErrNotGroupLeader
-	}
+		JOIN group_db_access a ON a.group_id=g.id AND a.database_id=m.database_id
+		JOIN user_groups ug ON ug.group_id=g.id AND ug.user_id=g.leader_user_id
+		JOIN users u ON u.id=ug.user_id AND u.is_active
+		WHERE d.request_id=$1 AND g.leader_user_id=$2 AND d.leader_user_id=$2
+		  AND ($3::bigint=0 OR d.group_id=$3)
+		ORDER BY d.group_id LIMIT 2`, requestID, actorID, groupID)
 	if err != nil {
 		return Review{}, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE migration_review_decisions SET decision=$3,comment=$4,decided_at=now() WHERE request_id=$1 AND group_id=$2`, requestID, groupID, decision, strings.TrimSpace(comment))
+	groups, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return Review{}, err
+	}
+	if len(groups) == 0 {
+		return Review{}, ErrNotGroupLeader
+	}
+	if len(groups) > 1 {
+		return Review{}, ErrReviewGroupRequired
+	}
+	_, err = tx.Exec(ctx, `UPDATE migration_review_decisions SET decision=$3,comment=$4,decided_at=now()
+		WHERE request_id=$1 AND group_id=$2`, requestID, groups[0], decision, strings.TrimSpace(comment))
 	if err != nil {
 		return Review{}, fmt.Errorf("migration: save review decision: %w", err)
 	}
@@ -318,7 +348,7 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 		_, err = tx.Exec(ctx, `UPDATE migration_review_requests SET status='rejected',decided_at=now() WHERE request_id=$1`, requestID)
 	} else {
 		_, err = tx.Exec(ctx, `UPDATE migration_review_requests q SET status='approved',decided_at=now()
-			WHERE q.request_id=$1 AND NOT EXISTS (SELECT 1 FROM migration_review_decisions d WHERE d.request_id=q.request_id AND d.decision IS DISTINCT FROM 'approved')`, requestID)
+			FROM migrations m WHERE q.migration_id=m.id AND q.request_id=$1 AND `+allCurrentGroupsApproved, requestID)
 	}
 	if err != nil {
 		return Review{}, err
@@ -329,59 +359,61 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 	return r.GetReview(ctx, requestID)
 }
 
-func (r *PostgresApprovalRepository) EnqueueApproved(ctx context.Context, requestID string) (QueueJob, error) {
-	tx, err := r.pool.Begin(ctx)
+// PendingApprovedApply includes reviews previously marked enqueued by the
+// legacy queue. Only a link to the worker's durable job acknowledges delivery.
+func (r *PostgresApprovalRepository) PendingApprovedApply(ctx context.Context) ([]Review, error) {
+	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by
+		FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id
+		WHERE q.status='approved' AND q.operation='apply' AND q.async_job_id IS NULL
+		ORDER BY q.decided_at, q.request_id`)
 	if err != nil {
-		return QueueJob{}, err
+		return nil, err
 	}
-	defer tx.Rollback(ctx)
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM migration_review_requests WHERE request_id=$1 FOR UPDATE`, requestID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
-		return QueueJob{}, ErrReviewNotFound
-	} else if err != nil {
-		return QueueJob{}, err
-	}
-	if status != string(ReviewApproved) {
-		return QueueJob{}, ErrQueueNotApproved
-	}
-	if err := r.verifyCurrentAuthorization(ctx, requestID); err != nil {
-		return QueueJob{}, err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO migration_queue_jobs(request_id) VALUES($1) ON CONFLICT(request_id) DO NOTHING`, requestID)
-	if err != nil {
-		return QueueJob{}, fmt.Errorf("migration: enqueue review: %w", err)
-	}
-	_, err = tx.Exec(ctx, `UPDATE migration_review_requests SET enqueued_at=COALESCE(enqueued_at,now()) WHERE request_id=$1`, requestID)
-	if err != nil {
-		return QueueJob{}, err
-	}
-	var job QueueJob
-	err = tx.QueryRow(ctx, `SELECT id,request_id,status,attempts,created_at,started_at FROM migration_queue_jobs WHERE request_id=$1`, requestID).Scan(&job.ID, &job.RequestID, &job.Status, &job.Attempts, &job.CreatedAt, &job.StartedAt)
-	if err != nil {
-		return QueueJob{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return QueueJob{}, err
-	}
-	return job, nil
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Review, error) {
+		var review Review
+		err := row.Scan(&review.RequestID, &review.MigrationID, &review.DatabaseID, &review.Revision,
+			&review.Operation, &review.RequestedBy)
+		return review, err
+	})
 }
+
+func (r *PostgresApprovalRepository) AcknowledgeDispatch(ctx context.Context, requestID string, jobID int64) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE migration_review_requests q
+		SET async_job_id=j.id, enqueued_at=CASE WHEN q.async_job_id IS NULL THEN clock_timestamp() ELSE q.enqueued_at END
+		FROM migration_async_jobs j
+		WHERE q.request_id=$1 AND q.status='approved' AND j.id=$2 AND j.request_id=q.request_id
+		  AND (q.async_job_id IS NULL OR q.async_job_id=j.id)`, requestID, jobID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrQueueNotApproved
+	}
+	return nil
+}
+
+// Used both when a review becomes approved and when the worker rechecks it.
+const allCurrentGroupsApproved = `EXISTS (SELECT 1 FROM group_db_access a WHERE a.database_id=m.database_id)
+		  AND NOT EXISTS (
+			SELECT 1 FROM group_db_access a
+			JOIN groups g ON g.id=a.group_id
+			LEFT JOIN migration_review_decisions d ON d.request_id=q.request_id AND d.group_id=a.group_id
+			WHERE a.database_id=m.database_id
+			  AND (d.decision IS DISTINCT FROM 'approved'
+				OR g.leader_user_id IS DISTINCT FROM d.leader_user_id
+				OR NOT EXISTS (
+					SELECT 1 FROM user_groups ug JOIN users u ON u.id=ug.user_id AND u.is_active
+					WHERE ug.group_id=g.id AND ug.user_id=g.leader_user_id)))
+		  AND NOT EXISTS (
+			SELECT 1 FROM migration_review_decisions d WHERE d.request_id=q.request_id
+			AND NOT EXISTS (SELECT 1 FROM group_db_access a WHERE a.group_id=d.group_id AND a.database_id=m.database_id))`
 
 func (r *PostgresApprovalRepository) ApprovedReview(ctx context.Context, migrationID int64, revision, operation string) (Review, error) {
-	return r.findByRevisionStatus(ctx, migrationID, revision, operation, string(ReviewApproved))
-}
-
-func (r *PostgresApprovalRepository) findByRevisionStatus(ctx context.Context, migrationID int64, revision, operation, status string) (Review, error) {
 	var id string
-	err := r.pool.QueryRow(ctx, `SELECT request_id FROM migration_review_requests q
+	err := r.pool.QueryRow(ctx, `SELECT q.request_id FROM migration_review_requests q
 		JOIN migrations m ON m.id=q.migration_id
-		WHERE q.migration_id=$1 AND q.revision=$2 AND q.operation=$3 AND q.status=$4
-		  AND NOT EXISTS (SELECT 1 FROM group_db_access a
-			WHERE a.database_id=m.database_id AND NOT EXISTS (SELECT 1 FROM migration_review_decisions d WHERE d.request_id=q.request_id AND d.group_id=a.group_id))
-		  AND NOT EXISTS (SELECT 1 FROM migration_review_decisions d
-			JOIN groups g ON g.id=d.group_id
-			WHERE d.request_id=q.request_id
-			  AND (g.leader_user_id IS DISTINCT FROM d.leader_user_id
-				OR NOT EXISTS (SELECT 1 FROM group_db_access a WHERE a.group_id=d.group_id AND a.database_id=m.database_id)))`, migrationID, revision, operation, status).Scan(&id)
+		WHERE q.migration_id=$1 AND q.revision=$2 AND q.operation=$3 AND q.status='approved' AND `+allCurrentGroupsApproved,
+		migrationID, revision, operation).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrApprovalRequired
 	}
@@ -389,25 +421,6 @@ func (r *PostgresApprovalRepository) findByRevisionStatus(ctx context.Context, m
 		return Review{}, err
 	}
 	return r.GetReview(ctx, id)
-}
-
-func (r *PostgresApprovalRepository) verifyCurrentAuthorization(ctx context.Context, requestID string) error {
-	var ok bool
-	err := r.pool.QueryRow(ctx, `SELECT NOT EXISTS (
-		SELECT 1 FROM migration_review_requests q
-		JOIN migrations m ON m.id=q.migration_id
-		WHERE q.request_id=$1 AND (
-			EXISTS (SELECT 1 FROM group_db_access a WHERE a.database_id=m.database_id AND NOT EXISTS (SELECT 1 FROM migration_review_decisions d WHERE d.request_id=q.request_id AND d.group_id=a.group_id))
-			OR EXISTS (SELECT 1 FROM migration_review_decisions d JOIN groups g ON g.id=d.group_id
-				WHERE d.request_id=q.request_id AND (g.leader_user_id IS DISTINCT FROM d.leader_user_id OR NOT EXISTS (SELECT 1 FROM group_db_access a WHERE a.group_id=d.group_id AND a.database_id=m.database_id)))
-		)`, requestID).Scan(&ok)
-	if err != nil {
-		return fmt.Errorf("migration: recheck review authorization: %w", err)
-	}
-	if !ok {
-		return ErrRevisionChanged
-	}
-	return nil
 }
 
 func CurrentRevision(m Migration) string {
@@ -419,14 +432,6 @@ func CurrentRevision(m Migration) string {
 		def += "irreversible:" + *m.IrreversibleReason
 	}
 	return Revision(m.Title, def)
-}
-
-type ApprovalService interface {
-	SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string) (Review, error)
-	GetReview(ctx context.Context, userID int64, requestID string) (Review, error)
-	ListReviews(ctx context.Context, userID, databaseID int64) ([]Review, error)
-	DecideReview(ctx context.Context, userID int64, requestID, decision, comment string) (Review, error)
-	EnqueueApproved(ctx context.Context, userID int64, requestID string) (QueueJob, error)
 }
 
 func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string) (Review, error) {
@@ -447,7 +452,7 @@ func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migratio
 	if m.Status != StatusDraft {
 		return Review{}, ErrNotDraft
 	}
-	return s.approvals.SubmitReview(ctx, SubmitReviewParams{MigrationID: migrationID, DatabaseID: databaseID, Revision: CurrentRevision(m), Operation: op, RequestedBy: userID})
+	return s.approvals.SubmitReview(ctx, SubmitReviewParams{MigrationID: migrationID, DatabaseID: databaseID, Revision: CurrentRevision(m), Operation: op, RequestedBy: userID, DefinitionRevision: m.Revision})
 }
 
 func (s *Service) GetReview(ctx context.Context, userID int64, requestID string) (Review, error) {
@@ -474,7 +479,7 @@ func (s *Service) ListReviews(ctx context.Context, userID, databaseID int64) ([]
 	return s.approvals.ListReviews(ctx, databaseID)
 }
 
-func (s *Service) DecideReview(ctx context.Context, userID int64, requestID, decision, comment string) (Review, error) {
+func (s *Service) DecideReview(ctx context.Context, userID int64, requestID string, groupID int64, decision, comment string) (Review, error) {
 	if s.approvals == nil {
 		return Review{}, ErrApprovalsUnavailable
 	}
@@ -485,26 +490,19 @@ func (s *Service) DecideReview(ctx context.Context, userID int64, requestID, dec
 	if _, err := s.requireLevel(ctx, userID, review.DatabaseID, access.LevelView); err != nil {
 		return Review{}, err
 	}
-	m, err := s.repo.GetByID(ctx, review.DatabaseID, review.MigrationID)
+	return s.approvals.DecideReview(ctx, requestID, userID, groupID, review.Revision, decision, comment)
+}
+
+func (s *Service) ReviewForDispatch(ctx context.Context, userID int64, requestID string) (Review, error) {
+	review, err := s.GetReview(ctx, userID, requestID)
 	if err != nil {
 		return Review{}, err
 	}
-	if CurrentRevision(m) != review.Revision {
-		return Review{}, ErrRevisionChanged
-	}
-	return s.approvals.DecideReview(ctx, requestID, userID, review.Revision, decision, comment)
-}
-
-func (s *Service) EnqueueApproved(ctx context.Context, userID int64, requestID string) (QueueJob, error) {
-	if s.approvals == nil {
-		return QueueJob{}, ErrApprovalsUnavailable
-	}
-	review, err := s.GetReview(ctx, userID, requestID)
-	if err != nil {
-		return QueueJob{}, err
+	if _, err := s.requireLevel(ctx, userID, review.DatabaseID, access.LevelEdit); err != nil {
+		return Review{}, err
 	}
 	if review.Status != ReviewApproved {
-		return QueueJob{}, ErrQueueNotApproved
+		return Review{}, ErrQueueNotApproved
 	}
-	return s.approvals.EnqueueApproved(ctx, requestID)
+	return review, nil
 }

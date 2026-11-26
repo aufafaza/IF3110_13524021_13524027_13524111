@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
@@ -26,7 +30,8 @@ import (
 
 func main() {
 	observability.ConfigureJSON(os.Stdout)
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -88,6 +93,9 @@ func main() {
 	)
 	approvalRepo := migration.NewPostgresApprovalRepository(pool)
 	migrationService := migration.NewServiceWithApprovals(migrationRepo, migrationRunner, checker, approvalRepo)
+	jobStore := migrationjob.NewStore(pool)
+	queue := migrationjob.NewReviewQueue(jobStore, approvalRepo)
+	worker := migrationjob.NewApprovedWorker(jobStore, registry, migrationService)
 
 	handler := web.New(web.Deps{
 		Auth:          auth.NewHandler(authService, sessions, cookie),
@@ -96,8 +104,8 @@ func main() {
 		Authenticate:  middleware.NewAuthenticator(sessions, userStore, cookie),
 		Guard:         access.NewGuard(checker),
 		Databases:     database.NewHandler(registry, database.NewViewer(registry), checker, nil, tmpl),
-		Migrations:    migration.NewHandler(migrationService),
-		MigrationJobs: migrationjob.NewHandler(migrationjob.NewStore(pool), checker),
+		Migrations:    migration.NewQueuedHandler(migrationService, queue),
+		MigrationJobs: migrationjob.NewHandler(jobStore, checker),
 	})
 
 	srv := &http.Server{
@@ -105,6 +113,28 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	var workers sync.WaitGroup
+	workers.Go(func() { queue.Run(ctx) })
+	for range 2 {
+		workers.Go(func() { worker.Run(ctx) })
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("server shutdown: %v", err)
+		}
+	}()
+
 	log.Printf("listening on %s", cfg.ListenAddr)
-	log.Fatal(srv.ListenAndServe())
+	err = srv.ListenAndServe()
+	stop()
+	<-shutdownDone
+	workers.Wait()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }

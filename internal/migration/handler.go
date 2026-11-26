@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,9 +13,20 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 )
 
-type Handler struct{ service *Service }
+type ReviewDispatcher interface {
+	DispatchReview(context.Context, Review) (QueueJob, error)
+}
+
+type Handler struct {
+	service *Service
+	queue   ReviewDispatcher
+}
 
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+
+func NewQueuedHandler(service *Service, queue ReviewDispatcher) *Handler {
+	return &Handler{service: service, queue: queue}
+}
 
 var errInvalidRequest = errors.New("migration: invalid request")
 
@@ -178,6 +190,28 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ErrConfirmationMissing)
 		return
 	}
+	if h.queue != nil {
+		op, err := normalizeOperation(in.Operation)
+		if err != nil || op != string(OpApply) {
+			writeError(w, ErrInvalidOperation)
+			return
+		}
+		m, review, err := h.service.ApprovedApply(r.Context(), user.ID, dbID, id)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		job, err := h.queue.DispatchReview(r.Context(), review)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, struct {
+			Migration
+			JobID int64 `json:"job_id"`
+		}{m, job.ID})
+		return
+	}
 	executed, err := h.service.ExecuteOperation(r.Context(), user.ID, dbID, id, in.Operation)
 	if err != nil {
 		if executed.ID != 0 && executed.Status == StatusFailed {
@@ -237,13 +271,18 @@ func (h *Handler) handleReviewDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
+		GroupID  int64  `json:"group_id"`
 		Decision string `json:"decision"`
 		Comment  string `json:"comment"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	review, err := h.service.DecideReview(r.Context(), user.ID, requestID, in.Decision, in.Comment)
+	if in.GroupID < 0 {
+		writeError(w, errInvalidRequest)
+		return
+	}
+	review, err := h.service.DecideReview(r.Context(), user.ID, requestID, in.GroupID, in.Decision, in.Comment)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -257,7 +296,16 @@ func (h *Handler) handleEnqueueReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ErrUnauthenticated)
 		return
 	}
-	job, err := h.service.EnqueueApproved(r.Context(), user.ID, r.PathValue("requestID"))
+	if h.queue == nil {
+		writeError(w, ErrApprovalsUnavailable)
+		return
+	}
+	review, err := h.service.ReviewForDispatch(r.Context(), user.ID, r.PathValue("requestID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	job, err := h.queue.DispatchReview(r.Context(), review)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -336,7 +384,7 @@ func statusForError(err error) int {
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrForbidden):
 		return http.StatusForbidden
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrReviewNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch):
 		return http.StatusConflict
@@ -344,7 +392,7 @@ func statusForError(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrNotGroupLeader), errors.Is(err, ErrLeaderMissing):
 		return http.StatusForbidden
-	case errors.Is(err, ErrInvalidOperation):
+	case errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrReviewGroupRequired), errors.Is(err, ErrInvalidDecision):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition), errors.Is(err, ErrInvalidAttempt):
 		return http.StatusBadRequest
