@@ -28,7 +28,7 @@ type fixtureServices struct {
 }
 
 func (f fixtureServices) PendingDispatch(ctx context.Context) ([]Approval, error) {
-	rows, err := f.pool.Query(ctx, `SELECT id, actor_id, database_id FROM fixture_approvals WHERE job_id IS NULL`)
+	rows, err := f.pool.Query(ctx, `SELECT id, actor_id, database_id, mode FROM fixture_approvals WHERE job_id IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,7 @@ func (f fixtureServices) PendingDispatch(ctx context.Context) ([]Approval, error
 	var requests []Approval
 	for rows.Next() {
 		request := Approval{MigrationID: 1, Revision: "revision-1", Operation: Apply, Traceparent: "fixture-trace"}
-		if err := rows.Scan(&request.RequestID, &request.ActorID, &request.DatabaseID); err != nil {
+		if err := rows.Scan(&request.RequestID, &request.ActorID, &request.DatabaseID, &request.Mode); err != nil {
 			return nil, err
 		}
 		requests = append(requests, request)
@@ -64,6 +64,12 @@ func (f fixtureServices) ResolveSQL(ctx context.Context, a Approval) (string, er
 	var sql string
 	err := f.pool.QueryRow(ctx, `SELECT sql FROM fixture_approvals WHERE id = $1`, a.RequestID).Scan(&sql)
 	return sql, err
+}
+
+func (f fixtureServices) ResolveBatch(ctx context.Context, a Approval) (BatchPlan, error) {
+	var plan BatchPlan
+	err := f.pool.QueryRow(ctx, `SELECT batch_plan FROM fixture_approvals WHERE id = $1`, a.RequestID).Scan(&plan)
+	return plan, err
 }
 
 func (f fixtureServices) Record(ctx context.Context, outcome Outcome) error {
@@ -114,7 +120,8 @@ func setupWorkerTest(t *testing.T) workerTest {
 	}{
 		{platform, `CREATE TABLE fixture_approvals (
 			id text PRIMARY KEY, actor_id bigint, database_id bigint, job_id bigint,
-			approved boolean NOT NULL DEFAULT true, sql text NOT NULL
+			approved boolean NOT NULL DEFAULT true, sql text NOT NULL,
+			mode text NOT NULL DEFAULT 'ordinary', batch_plan jsonb
 		);
 		CREATE TABLE fixture_history (
 			execution_id text, attempt_id text, payload jsonb, deliveries integer NOT NULL DEFAULT 1,
@@ -130,12 +137,14 @@ func setupWorkerTest(t *testing.T) workerTest {
 			t.Fatal(err)
 		}
 	}
-	provision, err := os.ReadFile("../../migrations/target/0001_async_migration_evidence.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := target.Exec(t.Context(), string(provision)); err != nil {
-		t.Fatal(err)
+	for _, filename := range []string{"0001_async_migration_evidence.sql", "0002_async_migration_batches.sql"} {
+		provision, err := os.ReadFile("../../migrations/target/" + filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := target.Exec(t.Context(), string(provision)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return workerTest{
 		platform: platform, target: target, fixtures: fixtureServices{platform}, store: NewStore(platform),

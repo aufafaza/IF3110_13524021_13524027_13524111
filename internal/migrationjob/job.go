@@ -6,7 +6,11 @@ import (
 	"time"
 )
 
-const Apply = "apply"
+const (
+	Apply    = "apply"
+	Ordinary = "ordinary"
+	Batch    = "batch"
+)
 
 type State string
 
@@ -16,6 +20,7 @@ const (
 	Reconciling State = "reconciling"
 	Reporting   State = "reporting"
 	Retrying    State = "retrying"
+	Partial     State = "partial"
 	Succeeded   State = "succeeded"
 	Failed      State = "failed"
 )
@@ -23,8 +28,8 @@ const (
 var (
 	ErrNotFound         = errors.New("migration job not found")
 	ErrApprovalMismatch = errors.New("approved request ID has different execution identity")
-	ErrIneligible = errors.New("migration is no longer eligible")
-	errClaimLost  = errors.New("migration job claim expired or was replaced")
+	ErrIneligible       = errors.New("migration is no longer eligible")
+	errClaimLost        = errors.New("migration job claim expired or was replaced")
 )
 
 type Approval struct {
@@ -34,6 +39,7 @@ type Approval struct {
 	MigrationID int64
 	Revision    string
 	Operation   string
+	Mode        string
 	Traceparent string
 	Tracestate  string
 }
@@ -51,6 +57,21 @@ type Plans interface {
 	ResolveSQL(context.Context, Approval) (string, error)
 }
 
+// BatchPlans resolves the immutable plan for a batch-mode approval.
+// ScopeSQL returns the fixed membership as one unique immutable bigint
+// column named key. SQL is one UPDATE receiving the batch's bigint[] at $1
+// and returning the updated bigint key of every affected row via RETURNING.
+// The approved plan must avoid indirect changes outside the supplied scope.
+type BatchPlans interface {
+	ResolveBatch(context.Context, Approval) (BatchPlan, error)
+}
+
+type BatchPlan struct {
+	ScopeSQL string
+	SQL      string
+	Size     int
+}
+
 type Outcome struct {
 	Approval
 	JobID       int64
@@ -60,7 +81,8 @@ type Outcome struct {
 	SQL         string
 	StartedAt   time.Time
 	FinishedAt  time.Time
-	FailureCode string // empty on success
+	FailureCode string     // empty on success
+	BatchPlan   *BatchPlan `json:",omitempty"`
 }
 
 type History interface {
@@ -68,17 +90,22 @@ type History interface {
 }
 
 type Job struct {
-	ID          int64     `json:"id"`
-	ExecutionID string    `json:"execution_id"`
-	DatabaseID  int64     `json:"database_id"`
-	MigrationID int64     `json:"migration_id"`
-	Revision    string    `json:"revision"`
-	Operation   string    `json:"operation"`
-	State       State     `json:"state"`
-	Attempts    int       `json:"attempts"`
-	FailureCode string    `json:"failure_code,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID               int64     `json:"id"`
+	ExecutionID      string    `json:"execution_id"`
+	DatabaseID       int64     `json:"database_id"`
+	MigrationID      int64     `json:"migration_id"`
+	Revision         string    `json:"revision"`
+	Operation        string    `json:"operation"`
+	Mode             string    `json:"mode"`
+	ScopeRows        *int64    `json:"scope_rows,omitempty"`
+	CommittedBatches int64     `json:"committed_batches"`
+	CommittedRows    int64     `json:"committed_rows"`
+	BatchPaused      bool      `json:"batch_paused,omitempty"`
+	State            State     `json:"state"`
+	Attempts         int       `json:"attempts"`
+	FailureCode      string    `json:"failure_code,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type Dispatcher struct {
