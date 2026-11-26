@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"fmt"
+	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 )
@@ -23,6 +25,7 @@ type Service struct {
 	runner   *Runner
 	checker  access.DatabaseChecker
 	analyzer PlanAnalyzer
+	history  HistoryRepository
 }
 
 func NewService(repo Repository, runner *Runner, checker access.DatabaseChecker) *Service {
@@ -37,7 +40,13 @@ func NewService(repo Repository, runner *Runner, checker access.DatabaseChecker)
 		runner:   runner,
 		checker:  checker,
 		analyzer: analyzer,
+		history:  historyFrom(repo),
 	}
+}
+
+func historyFrom(repo Repository) HistoryRepository {
+	hr, _ := repo.(HistoryRepository)
+	return hr
 }
 
 func (s *Service) UserLevel(ctx context.Context, userID, databaseID int64) (access.Level, error) {
@@ -199,4 +208,150 @@ func (s *Service) GetDetail(ctx context.Context, userID, databaseID, migrationID
 		return Migration{}, err
 	}
 	return s.repo.GetByID(ctx, databaseID, migrationID)
+}
+
+func (s *Service) CreateDraftWithDefinition(ctx context.Context, userID, databaseID int64, title, up string, down, reason *string) (Migration, error) {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
+		return Migration{}, err
+	}
+	title = strings.TrimSpace(title)
+	if err := ValidateTitle(title); err != nil {
+		return Migration{}, err
+	}
+	if err := ValidateDefinition(up, down, reason); err != nil {
+		return Migration{}, err
+	}
+	return s.repo.CreateDraft(ctx, CreateDraftParams{
+		DatabaseID: databaseID, Title: title, SQL: up,
+		DownSQL: down, IrreversibleReason: reason, CreatedBy: userID,
+	})
+}
+
+func (s *Service) UpdateDraftWithDefinition(ctx context.Context, userID, databaseID, migrationID int64, title, up string, down, reason *string) (Migration, error) {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
+		return Migration{}, err
+	}
+	title = strings.TrimSpace(title)
+	if err := ValidateTitle(title); err != nil {
+		return Migration{}, err
+	}
+	if err := ValidateDefinition(up, down, reason); err != nil {
+		return Migration{}, err
+	}
+	return s.repo.UpdateDraft(ctx, UpdateDraftParams{
+		ID: migrationID, DatabaseID: databaseID, Title: title, SQL: up,
+		DownSQL: down, IrreversibleReason: reason,
+	})
+}
+
+// PlanOperation dipakai SPA/approval (preview rencana) dan PIC 1 (revalidasi di
+// bawah lock). revision = 0 berarti tidak diperiksa; selain itu harus sama
+// dengan revisi yang disetujui.
+func (s *Service) PlanOperation(ctx context.Context, userID, databaseID, migrationID int64, op Operation, revision int) (Plan, error) {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
+		return Plan{}, err
+	}
+	if s.history == nil {
+		return Plan{}, ErrHistoryUnavailable
+	}
+	m, err := s.repo.GetByID(ctx, databaseID, migrationID)
+	if err != nil {
+		return Plan{}, err
+	}
+	if revision != 0 && revision != m.Revision {
+		return Plan{}, ErrRevisionMismatch
+	}
+	entries, err := s.history.ListHistoryEntries(ctx, databaseID)
+	if err != nil {
+		return Plan{}, err
+	}
+	entries = DedupeAttempts(entries)
+
+	var plan Plan
+	switch op {
+	case OpApply:
+		plan, err = PlanApplyFor(m, entries)
+	case OpRollback:
+		plan, err = PlanRollback(m, entries)
+	case OpForward:
+		plan, err = PlanForward(m, entries)
+	default:
+		return Plan{}, errInvalidRequest
+	}
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := ValidateSQL(plan.SQL); err != nil {
+		return Plan{}, err
+	}
+	return plan, nil
+}
+
+func validateAttempt(a AttemptResult) error {
+	switch a.Operation {
+	case OpApply, OpRollback, OpForward:
+	default:
+		return fmt.Errorf("%w: operation %q", ErrInvalidAttempt, a.Operation)
+	}
+	switch a.Status {
+	case AttemptSucceeded, AttemptFailed:
+	default:
+		return fmt.Errorf("%w: status %q", ErrInvalidAttempt, a.Status)
+	}
+	if a.DatabaseID <= 0 || a.MigrationID <= 0 || a.ActorID <= 0 || a.Revision <= 0 ||
+		a.ExecutionID == "" || a.AttemptID == "" || strings.TrimSpace(a.ExecutedSQL) == "" {
+		return fmt.Errorf("%w: missing required field", ErrInvalidAttempt)
+	}
+	isCommittedRollback := a.Operation == OpRollback && a.Status == AttemptSucceeded
+	if isCommittedRollback != (a.RollbackOfExecutionID != nil) {
+		return fmt.Errorf("%w: rollback target must be set only on successful rollback", ErrInvalidAttempt)
+	}
+	return nil
+}
+
+// RecordAttempt dipanggil PIC 1. Idempoten per (execution_id, attempt_id):
+// redelivery mengembalikan entri lama dengan created=false.
+func (s *Service) RecordAttempt(ctx context.Context, a AttemptResult) (HistoryEntry, bool, error) {
+	if s.history == nil {
+		return HistoryEntry{}, false, ErrHistoryUnavailable
+	}
+	if err := validateAttempt(a); err != nil {
+		return HistoryEntry{}, false, err
+	}
+	entries, err := s.history.ListHistoryEntries(ctx, a.DatabaseID)
+	if err != nil {
+		return HistoryEntry{}, false, err
+	}
+	for _, e := range entries {
+		if e.ExecutionID == a.ExecutionID && e.AttemptID == a.AttemptID {
+			return e, false, nil
+		}
+	}
+	if a.Operation == OpRollback && a.Status == AttemptSucceeded {
+		chain, err := ActiveChain(entries)
+		if err != nil {
+			return HistoryEntry{}, false, err
+		}
+		if len(chain) == 0 || chain[len(chain)-1].ExecutionID != *a.RollbackOfExecutionID {
+			return HistoryEntry{}, false, ErrNotLatestActive
+		}
+	}
+	if a.At.IsZero() {
+		a.At = time.Now().UTC()
+	}
+	return s.history.AppendHistory(ctx, a)
+}
+
+func (s *Service) ListAttemptHistory(ctx context.Context, userID, databaseID int64, hideRollback bool) ([]HistoryEntry, error) {
+	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelView); err != nil {
+		return nil, err
+	}
+	if s.history == nil {
+		return nil, ErrHistoryUnavailable
+	}
+	entries, err := s.history.ListHistoryEntries(ctx, databaseID)
+	if err != nil {
+		return nil, err
+	}
+	return VisibleHistory(DedupeAttempts(entries), hideRollback), nil
 }
