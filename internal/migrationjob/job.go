@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 )
 
 const (
@@ -33,15 +35,16 @@ var (
 )
 
 type Approval struct {
-	RequestID   string
-	ActorID     int64
-	DatabaseID  int64
-	MigrationID int64
-	Revision    string
-	Operation   string
-	Mode        string
-	Traceparent string
-	Tracestate  string
+	RequestID         string
+	ActorID           int64
+	DatabaseID        int64
+	MigrationID       int64
+	Revision          string
+	Operation         string
+	TargetExecutionID string
+	Mode              string
+	Traceparent       string
+	Tracestate        string
 }
 
 type ApprovalSource interface {
@@ -54,7 +57,7 @@ type Authorization interface {
 }
 
 type Plans interface {
-	ResolveSQL(context.Context, Approval) (string, error)
+	ResolvePlan(context.Context, Approval) (migration.Plan, error)
 }
 
 type BatchPlans interface {
@@ -69,15 +72,16 @@ type BatchPlan struct {
 
 type Outcome struct {
 	Approval
-	JobID       int64
-	ExecutionID string
-	AttemptID   string
-	Attempt     int
-	SQL         string
-	StartedAt   time.Time
-	FinishedAt  time.Time
-	FailureCode string     // empty on success
-	BatchPlan   *BatchPlan `json:",omitempty"`
+	JobID                 int64
+	ExecutionID           string
+	AttemptID             string
+	Attempt               int
+	SQL                   string
+	StartedAt             time.Time
+	FinishedAt            time.Time
+	FailureCode           string     // empty on success
+	RollbackOfExecutionID *string    `json:",omitempty"`
+	BatchPlan             *BatchPlan `json:",omitempty"`
 }
 
 type History interface {
@@ -85,22 +89,23 @@ type History interface {
 }
 
 type Job struct {
-	ID               int64     `json:"id"`
-	ExecutionID      string    `json:"execution_id"`
-	DatabaseID       int64     `json:"database_id"`
-	MigrationID      int64     `json:"migration_id"`
-	Revision         string    `json:"revision"`
-	Operation        string    `json:"operation"`
-	Mode             string    `json:"mode"`
-	ScopeRows        *int64    `json:"scope_rows,omitempty"`
-	CommittedBatches int64     `json:"committed_batches"`
-	CommittedRows    int64     `json:"committed_rows"`
-	BatchPaused      bool      `json:"batch_paused,omitempty"`
-	State            State     `json:"state"`
-	Attempts         int       `json:"attempts"`
-	FailureCode      string    `json:"failure_code,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                int64     `json:"id"`
+	ExecutionID       string    `json:"execution_id"`
+	DatabaseID        int64     `json:"database_id"`
+	MigrationID       int64     `json:"migration_id"`
+	Revision          string    `json:"revision"`
+	Operation         string    `json:"operation"`
+	TargetExecutionID string    `json:"target_execution_id,omitempty"`
+	Mode              string    `json:"mode"`
+	ScopeRows         *int64    `json:"scope_rows,omitempty"`
+	CommittedBatches  int64     `json:"committed_batches"`
+	CommittedRows     int64     `json:"committed_rows"`
+	BatchPaused       bool      `json:"batch_paused,omitempty"`
+	State             State     `json:"state"`
+	Attempts          int       `json:"attempts"`
+	FailureCode       string    `json:"failure_code,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type Dispatcher struct {

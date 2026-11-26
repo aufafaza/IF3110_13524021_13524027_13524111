@@ -224,7 +224,7 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, executed)
 }
 
-func (h *Handler) handleCurrentApplyReview(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleCurrentOperationReview(w http.ResponseWriter, r *http.Request) {
 	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
 		return
@@ -238,15 +238,13 @@ func (h *Handler) handleCurrentApplyReview(w http.ResponseWriter, r *http.Reques
 		}
 		revision = value
 	}
-	review, err := h.service.CurrentApplyReview(r.Context(), user.ID, dbID, id, revision)
+	review, err := h.service.CurrentOperationReview(r.Context(), user.ID, dbID, id, revision, r.URL.Query().Get("operation"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, struct {
-		Review *Review `json:"review"`
-	}{review})
+	writeJSON(w, http.StatusOK, review)
 }
 
 func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
@@ -255,8 +253,9 @@ func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Operation string `json:"operation"`
-		Revision  int    `json:"revision"`
+		Operation         string `json:"operation"`
+		Revision          int    `json:"revision"`
+		TargetExecutionID string `json:"target_execution_id"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -265,7 +264,7 @@ func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errInvalidRequest)
 		return
 	}
-	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation, in.Revision)
+	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation, in.Revision, in.TargetExecutionID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -416,7 +415,7 @@ func statusForError(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrReviewNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch):
+	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch), errors.Is(err, ErrOperationTargetChanged):
 		return http.StatusConflict
 	case errors.Is(err, ErrReviewClosed), errors.Is(err, ErrRevisionChanged), errors.Is(err, ErrApprovalRequired), errors.Is(err, ErrQueueNotApproved):
 		return http.StatusConflict

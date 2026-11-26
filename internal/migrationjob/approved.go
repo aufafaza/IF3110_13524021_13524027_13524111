@@ -19,11 +19,12 @@ func approvalFromReview(review migration.Review) Approval {
 	return Approval{
 		RequestID: review.RequestID, ActorID: review.RequestedBy, DatabaseID: review.DatabaseID,
 		MigrationID: review.MigrationID, Revision: review.Revision, Operation: review.Operation, Mode: Ordinary,
+		TargetExecutionID: review.TargetExecutionID,
 	}
 }
 
 func (s reviewSource) PendingDispatch(ctx context.Context) ([]Approval, error) {
-	reviews, err := s.repo.PendingApprovedApply(ctx)
+	reviews, err := s.repo.PendingApprovedOperations(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +51,7 @@ func (q *ReviewQueue) DispatchReview(ctx context.Context, review migration.Revie
 	if review.Status != migration.ReviewApproved {
 		return migration.QueueJob{}, migration.ErrQueueNotApproved
 	}
-	if review.Operation != Apply {
+	if !migration.Operation(review.Operation).IsOrdinary() || (review.Operation != Apply && review.TargetExecutionID == "") {
 		return migration.QueueJob{}, migration.ErrInvalidOperation
 	}
 	job, err := q.dispatcher.Dispatch(ctx, approvalFromReview(review))
@@ -100,19 +101,23 @@ func (s approvedWorkerServices) Recheck(ctx context.Context, approved Approval) 
 	return nil
 }
 
-func (s approvedWorkerServices) ResolveSQL(ctx context.Context, approved Approval) (string, error) {
+func (s approvedWorkerServices) ResolvePlan(ctx context.Context, approved Approval) (migration.Plan, error) {
 	plan, err := s.service.PlanApproved(ctx, migration.ApprovedOperation{
 		RequestID: approved.RequestID, ActorID: approved.ActorID, DatabaseID: approved.DatabaseID,
 		MigrationID: approved.MigrationID, Revision: approved.Revision, Operation: migration.Operation(approved.Operation),
+		TargetExecutionID: approved.TargetExecutionID,
 	}, true)
 	switch {
 	case errors.Is(err, migration.ErrApprovalRequired), errors.Is(err, migration.ErrRevisionChanged),
 		errors.Is(err, migration.ErrForbidden), errors.Is(err, migration.ErrNotFound),
 		errors.Is(err, migration.ErrAlreadyApplied), errors.Is(err, migration.ErrNotDraft),
-		errors.Is(err, migration.ErrNonTransactionalSQL), errors.Is(err, migration.ErrEmptySQL):
-		return "", errors.Join(ErrIneligible, err)
+		errors.Is(err, migration.ErrNonTransactionalSQL), errors.Is(err, migration.ErrEmptySQL),
+		errors.Is(err, migration.ErrNotLatestActive), errors.Is(err, migration.ErrNothingToForward),
+		errors.Is(err, migration.ErrIrreversible), errors.Is(err, migration.ErrImmutable),
+		errors.Is(err, migration.ErrOperationTargetChanged):
+		return migration.Plan{}, errors.Join(ErrIneligible, err)
 	default:
-		return plan.SQL, err
+		return plan, err
 	}
 }
 
@@ -122,6 +127,7 @@ func (s approvedWorkerServices) Record(ctx context.Context, outcome Outcome) err
 		ExecutionID: outcome.ExecutionID, AttemptID: outcome.AttemptID,
 		Operation: migration.Operation(outcome.Operation), Status: migration.AttemptSucceeded,
 		ActorID: outcome.ActorID, ExecutedSQL: outcome.SQL, At: outcome.FinishedAt,
+		RollbackOfExecutionID: outcome.RollbackOfExecutionID,
 	}
 	if outcome.FailureCode != "" {
 		result.Status = migration.AttemptFailed

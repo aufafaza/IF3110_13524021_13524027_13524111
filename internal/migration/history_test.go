@@ -7,7 +7,7 @@ import (
 )
 
 func entry(mig int64, exec, attempt string, op migration.Operation, st migration.AttemptStatus, target string) migration.HistoryEntry {
-	e := migration.HistoryEntry{MigrationID: mig, ExecutionID: exec, AttemptID: attempt, Operation: op, Status: st}
+	e := migration.HistoryEntry{MigrationID: mig, Revision: 1, ExecutionID: exec, AttemptID: attempt, Operation: op, Status: st}
 	if target != "" {
 		e.RollbackOfExecutionID = &target
 	}

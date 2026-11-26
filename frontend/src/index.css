@@ -279,6 +279,7 @@ button:disabled {
 
 .migration-summary dd {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .sql-view {

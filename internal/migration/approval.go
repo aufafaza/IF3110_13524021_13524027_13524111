@@ -34,18 +34,19 @@ type ReviewDecision struct {
 }
 
 type Review struct {
-	RequestID   string           `json:"request_id"`
-	MigrationID int64            `json:"migration_id"`
-	DatabaseID  int64            `json:"database_id"`
-	Revision    string           `json:"revision"`
-	Operation   string           `json:"operation"`
-	RequestedBy int64            `json:"requested_by"`
-	Status      ReviewStatus     `json:"status"`
-	CreatedAt   time.Time        `json:"created_at"`
-	DecidedAt   *time.Time       `json:"decided_at,omitempty"`
-	EnqueuedAt  *time.Time       `json:"enqueued_at,omitempty"`
-	JobID       *int64           `json:"job_id,omitempty"`
-	Decisions   []ReviewDecision `json:"decisions"`
+	RequestID         string           `json:"request_id"`
+	MigrationID       int64            `json:"migration_id"`
+	DatabaseID        int64            `json:"database_id"`
+	Revision          string           `json:"revision"`
+	Operation         string           `json:"operation"`
+	TargetExecutionID string           `json:"target_execution_id,omitempty"`
+	RequestedBy       int64            `json:"requested_by"`
+	Status            ReviewStatus     `json:"status"`
+	CreatedAt         time.Time        `json:"created_at"`
+	DecidedAt         *time.Time       `json:"decided_at,omitempty"`
+	EnqueuedAt        *time.Time       `json:"enqueued_at,omitempty"`
+	JobID             *int64           `json:"job_id,omitempty"`
+	Decisions         []ReviewDecision `json:"decisions"`
 }
 
 type QueueJob struct {
@@ -64,15 +65,16 @@ type SubmitReviewParams struct {
 	Operation          string
 	RequestedBy        int64
 	DefinitionRevision int
+	TargetExecutionID  string
 }
 
 type ApprovalRepository interface {
 	SubmitReview(ctx context.Context, p SubmitReviewParams) (Review, error)
 	GetReview(ctx context.Context, requestID string) (Review, error)
 	ListReviews(ctx context.Context, databaseID int64) ([]Review, error)
-	FindByRevision(ctx context.Context, migrationID int64, revision, operation string) (Review, error)
+	FindByRevision(ctx context.Context, migrationID int64, revision, operation string, targetExecutionID *string) (Review, error)
 	DecideReview(ctx context.Context, requestID string, actorID, groupID int64, revision, decision, comment string) (Review, error)
-	ApprovedReview(ctx context.Context, migrationID int64, revision, operation string) (Review, error)
+	ApprovedReview(ctx context.Context, migrationID int64, revision, operation, targetExecutionID string) (Review, error)
 }
 
 var (
@@ -136,11 +138,11 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 
 	var status string
 	var definitionRevision int
-	if err := tx.QueryRow(ctx, `SELECT status, revision FROM migrations WHERE id=$1 AND database_id=$2 FOR SHARE`, p.MigrationID, p.DatabaseID).Scan(&status, &definitionRevision); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT status, revision FROM migrations WHERE id=$1 AND database_id=$2 FOR NO KEY UPDATE`, p.MigrationID, p.DatabaseID).Scan(&status, &definitionRevision); errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrNotFound
 	} else if err != nil {
 		return Review{}, fmt.Errorf("migration: review migration: %w", err)
-	} else if status != string(StatusDraft) {
+	} else if op == string(OpApply) && status != string(StatusDraft) {
 		return Review{}, ErrNotDraft
 	} else if definitionRevision != p.DefinitionRevision {
 		return Review{}, ErrRevisionChanged
@@ -179,11 +181,22 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 		return Review{}, ErrForbidden
 	}
 
+	if op != string(OpApply) {
+		_, err := tx.Exec(ctx, `UPDATE migration_review_requests q SET superseded_at=clock_timestamp()
+			FROM migration_async_jobs j
+			WHERE q.migration_id=$1 AND q.revision=$2 AND q.operation=$3 AND q.target_execution_id=$4
+			  AND q.superseded_at IS NULL AND q.async_job_id=j.id AND j.state='failed'`,
+			p.MigrationID, p.Revision, op, p.TargetExecutionID)
+		if err != nil {
+			return Review{}, fmt.Errorf("migration: retire failed operation review: %w", err)
+		}
+	}
+
 	requestID := newRequestID()
 	tag, err := tx.Exec(ctx, `INSERT INTO migration_review_requests
-		(request_id,migration_id,revision,operation,requested_by)
-		VALUES ($1,$2,$3,$4,$5) ON CONFLICT (migration_id,revision,operation) DO NOTHING`,
-		requestID, p.MigrationID, p.Revision, op, p.RequestedBy)
+		(request_id,migration_id,revision,operation,requested_by,target_execution_id)
+		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (migration_id,revision,operation,target_execution_id) WHERE superseded_at IS NULL DO NOTHING`,
+		requestID, p.MigrationID, p.Revision, op, p.RequestedBy, p.TargetExecutionID)
 	if err != nil {
 		return Review{}, fmt.Errorf("migration: create review: %w", err)
 	}
@@ -191,7 +204,7 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 		if err := tx.Commit(ctx); err != nil {
 			return Review{}, err
 		}
-		return r.FindByRevision(ctx, p.MigrationID, p.Revision, op)
+		return r.FindByRevision(ctx, p.MigrationID, p.Revision, op, &p.TargetExecutionID)
 	}
 	for _, req := range requirements {
 		if _, err := tx.Exec(ctx, `INSERT INTO migration_review_decisions(request_id,group_id,leader_user_id) VALUES($1,$2,$3)`, requestID, req.groupID, req.leaderID); err != nil {
@@ -204,9 +217,13 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 	return r.GetReview(ctx, requestID)
 }
 
-func (r *PostgresApprovalRepository) FindByRevision(ctx context.Context, migrationID int64, revision, operation string) (Review, error) {
+func (r *PostgresApprovalRepository) FindByRevision(ctx context.Context, migrationID int64, revision, operation string, targetExecutionID *string) (Review, error) {
 	var requestID string
-	err := r.pool.QueryRow(ctx, `SELECT request_id FROM migration_review_requests WHERE migration_id=$1 AND revision=$2 AND operation=$3`, migrationID, revision, operation).Scan(&requestID)
+	err := r.pool.QueryRow(ctx, `SELECT request_id FROM migration_review_requests
+		WHERE migration_id=$1 AND revision=$2 AND operation=$3 AND superseded_at IS NULL
+		  AND ($4::text IS NULL OR target_execution_id=$4)
+		  AND (operation='apply' OR target_execution_id<>'')
+		ORDER BY created_at DESC, request_id DESC LIMIT 1`, migrationID, revision, operation, targetExecutionID).Scan(&requestID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrReviewNotFound
 	}
@@ -217,12 +234,12 @@ func (r *PostgresApprovalRepository) FindByRevision(ctx context.Context, migrati
 }
 
 const reviewColumns = `q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,
-	q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id`
+	q.target_execution_id,q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id`
 
 func (r *PostgresApprovalRepository) GetReview(ctx context.Context, requestID string) (Review, error) {
 	var out Review
 	var status string
-	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID)
+	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &out.TargetExecutionID, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrReviewNotFound
 	}
@@ -363,12 +380,11 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 	return r.GetReview(ctx, requestID)
 }
 
-// PendingApprovedApply includes reviews previously marked enqueued by the
-// legacy queue. Only a link to the worker's durable job acknowledges delivery.
-func (r *PostgresApprovalRepository) PendingApprovedApply(ctx context.Context) ([]Review, error) {
-	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by
+func (r *PostgresApprovalRepository) PendingApprovedOperations(ctx context.Context) ([]Review, error) {
+	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,q.target_execution_id
 		FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id
-		WHERE q.status='approved' AND q.operation='apply' AND q.async_job_id IS NULL
+		WHERE q.status='approved' AND q.async_job_id IS NULL AND q.superseded_at IS NULL
+		  AND (q.operation='apply' OR (q.operation IN ('rollback','forward') AND q.target_execution_id<>''))
 		ORDER BY q.decided_at, q.request_id`)
 	if err != nil {
 		return nil, err
@@ -376,7 +392,7 @@ func (r *PostgresApprovalRepository) PendingApprovedApply(ctx context.Context) (
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Review, error) {
 		var review Review
 		err := row.Scan(&review.RequestID, &review.MigrationID, &review.DatabaseID, &review.Revision,
-			&review.Operation, &review.RequestedBy)
+			&review.Operation, &review.RequestedBy, &review.TargetExecutionID)
 		return review, err
 	})
 }
@@ -412,12 +428,13 @@ const allCurrentGroupsApproved = `EXISTS (SELECT 1 FROM group_db_access a WHERE 
 			SELECT 1 FROM migration_review_decisions d WHERE d.request_id=q.request_id
 			AND NOT EXISTS (SELECT 1 FROM group_db_access a WHERE a.group_id=d.group_id AND a.database_id=m.database_id))`
 
-func (r *PostgresApprovalRepository) ApprovedReview(ctx context.Context, migrationID int64, revision, operation string) (Review, error) {
+func (r *PostgresApprovalRepository) ApprovedReview(ctx context.Context, migrationID int64, revision, operation, targetExecutionID string) (Review, error) {
 	var id string
 	err := r.pool.QueryRow(ctx, `SELECT q.request_id FROM migration_review_requests q
 		JOIN migrations m ON m.id=q.migration_id
-		WHERE q.migration_id=$1 AND q.revision=$2 AND q.operation=$3 AND q.status='approved' AND `+allCurrentGroupsApproved,
-		migrationID, revision, operation).Scan(&id)
+		WHERE q.migration_id=$1 AND q.revision=$2 AND q.operation=$3 AND q.target_execution_id=$4 AND q.status='approved'
+		  AND q.superseded_at IS NULL AND `+allCurrentGroupsApproved,
+		migrationID, revision, operation, targetExecutionID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrApprovalRequired
 	}
@@ -438,7 +455,7 @@ func CurrentRevision(m Migration) string {
 	return Revision(m.Title, def)
 }
 
-func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string, revision int) (Review, error) {
+func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migrationID int64, operation string, revision int, targetExecutionID string) (Review, error) {
 	if s.approvals == nil {
 		return Review{}, ErrApprovalsUnavailable
 	}
@@ -456,10 +473,17 @@ func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migratio
 	if revision != 0 && revision != m.Revision {
 		return Review{}, ErrRevisionMismatch
 	}
-	if m.Status != StatusDraft {
-		return Review{}, ErrNotDraft
+	plan, err := s.planReview(ctx, m, Operation(op))
+	if err != nil {
+		return Review{}, err
 	}
-	return s.approvals.SubmitReview(ctx, SubmitReviewParams{MigrationID: migrationID, DatabaseID: databaseID, Revision: CurrentRevision(m), Operation: op, RequestedBy: userID, DefinitionRevision: m.Revision})
+	if targetExecutionID != "" && targetExecutionID != plan.TargetExecutionID {
+		return Review{}, ErrOperationTargetChanged
+	}
+	return s.approvals.SubmitReview(ctx, SubmitReviewParams{
+		MigrationID: migrationID, DatabaseID: databaseID, Revision: CurrentRevision(m), Operation: op,
+		RequestedBy: userID, DefinitionRevision: m.Revision, TargetExecutionID: plan.TargetExecutionID,
+	})
 }
 
 func (s *Service) GetReview(ctx context.Context, userID int64, requestID string) (Review, error) {
@@ -476,26 +500,63 @@ func (s *Service) GetReview(ctx context.Context, userID int64, requestID string)
 	return review, nil
 }
 
-// CurrentApplyReview returns the review of the current definition, if any.
-func (s *Service) CurrentApplyReview(ctx context.Context, userID, databaseID, migrationID int64, revision int) (*Review, error) {
+type OperationReview struct {
+	Review            *Review `json:"review"`
+	Plan              *Plan   `json:"plan"`
+	UnavailableReason string  `json:"unavailable_reason,omitempty"`
+}
+
+func (s *Service) planReview(ctx context.Context, m Migration, op Operation) (Plan, error) {
+	if !op.IsOrdinary() {
+		return Plan{}, ErrInvalidOperation
+	}
+	if op == OpApply && m.Status != StatusDraft {
+		return Plan{}, ErrNotDraft
+	}
+	if s.history == nil {
+		return Plan{}, ErrHistoryUnavailable
+	}
+	return s.planForDefinition(ctx, m, op)
+}
+
+func (s *Service) CurrentOperationReview(ctx context.Context, userID, databaseID, migrationID int64, revision int, operation string) (OperationReview, error) {
 	if s.approvals == nil {
-		return nil, ErrApprovalsUnavailable
+		return OperationReview{}, ErrApprovalsUnavailable
 	}
 	m, err := s.GetDetail(ctx, userID, databaseID, migrationID)
 	if err != nil {
-		return nil, err
+		return OperationReview{}, err
 	}
 	if revision != 0 && revision != m.Revision {
-		return nil, ErrRevisionMismatch
+		return OperationReview{}, ErrRevisionMismatch
 	}
-	review, err := s.approvals.FindByRevision(ctx, m.ID, CurrentRevision(m), string(OpApply))
+	op, err := normalizeOperation(operation)
+	if err != nil || !Operation(op).IsOrdinary() {
+		return OperationReview{}, ErrInvalidOperation
+	}
+
+	var result OperationReview
+	var target *string
+	plan, err := s.planReview(ctx, m, Operation(op))
+	switch {
+	case err == nil:
+		result.Plan = &plan
+		target = &plan.TargetExecutionID
+	case errors.Is(err, ErrNotDraft), errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrIrreversible),
+		errors.Is(err, ErrNothingToForward), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrImmutable):
+		result.UnavailableReason = err.Error()
+	default:
+		return OperationReview{}, err
+	}
+	review, err := s.approvals.FindByRevision(ctx, m.ID, CurrentRevision(m), op, target)
 	if errors.Is(err, ErrReviewNotFound) {
-		return nil, nil
+		return result, nil
 	}
 	if err != nil {
-		return nil, err
+		return OperationReview{}, err
 	}
-	return &review, nil
+	result.Review = &review
+	return result, nil
 }
 
 func (s *Service) ListReviews(ctx context.Context, userID, databaseID int64) ([]Review, error) {
@@ -518,6 +579,19 @@ func (s *Service) DecideReview(ctx context.Context, userID int64, requestID stri
 	}
 	if _, err := s.requireLevel(ctx, userID, review.DatabaseID, access.LevelView); err != nil {
 		return Review{}, err
+	}
+	if review.Operation != string(OpApply) {
+		m, err := s.repo.GetByID(ctx, review.DatabaseID, review.MigrationID)
+		if err != nil {
+			return Review{}, err
+		}
+		plan, err := s.planReview(ctx, m, Operation(review.Operation))
+		if err != nil {
+			return Review{}, err
+		}
+		if review.TargetExecutionID != plan.TargetExecutionID {
+			return Review{}, ErrOperationTargetChanged
+		}
 	}
 	return s.approvals.DecideReview(ctx, requestID, userID, groupID, review.Revision, decision, comment)
 }

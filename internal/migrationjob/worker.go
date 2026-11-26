@@ -88,6 +88,9 @@ func (w *Worker) report(ctx context.Context, c claim, a attempt) error {
 		Attempt: c.Attempts, SQL: a.sql, StartedAt: a.startedAt, FinishedAt: *a.finishedAt,
 		FailureCode: a.failureCode, BatchPlan: a.batchPlan,
 	}
+	if a.failureCode == "" {
+		outcome.RollbackOfExecutionID = a.rollbackOf
+	}
 	if err := w.history.Record(ctx, outcome); err != nil {
 		return w.deferStep(ctx, c, Reporting, "history_unavailable")
 	}
@@ -166,20 +169,20 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 	if err := w.auth.Recheck(ctx, c.approval); err != nil {
 		return w.dependencyFailure(ctx, c, err)
 	}
-	sql, err := w.plans.ResolveSQL(ctx, c.approval)
+	plan, err := w.plans.ResolvePlan(ctx, c.approval)
 	if err != nil {
 		return w.dependencyFailure(ctx, c, err)
 	}
-	if err := migration.ValidateSQL(sql); err != nil {
+	if err := migration.ValidateSQL(plan.SQL); err != nil {
 		return w.store.reschedule(ctx, c, Failed, "invalid_plan", 0)
 	}
-	planHash := fmt.Sprintf("%x", sha256.Sum256([]byte(sql)))
-	a, err = w.store.startAttempt(ctx, c, targetID, planHash, sql, nil)
+	planHash := fmt.Sprintf("%x", sha256.Sum256([]byte(plan.SQL+"\x00"+plan.TargetExecutionID)))
+	a, err = w.store.startAttempt(ctx, c, targetID, planHash, plan.SQL, nil, plan.RollbackOfExecutionID)
 	if err != nil {
 		return err
 	}
 	c.Attempts++
-	return w.execute(ctx, tx, c, a.id, planHash, sql)
+	return w.execute(ctx, tx, c, a.id, planHash, plan.SQL)
 }
 
 func (w *Worker) execute(ctx context.Context, tx pgx.Tx, c claim, attemptID, planHash, sql string) error {

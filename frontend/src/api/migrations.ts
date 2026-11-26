@@ -6,6 +6,8 @@ export type Migration = {
   status: string
   version?: number
   sql: string
+  down_sql?: string
+  irreversible_reason?: string
   created_at: string
   executed_at?: string
   first_executed_at?: string
@@ -39,6 +41,9 @@ export function migrationPost<T>(
   })
 }
 
+export const operationLabels = { apply: 'Apply', rollback: 'Rollback', forward: 'Forward' } as const
+export type MigrationOperation = keyof typeof operationLabels
+
 export type ReviewDecision = {
   group_id: number
   group_name: string
@@ -47,9 +52,10 @@ export type ReviewDecision = {
   comment?: string
 }
 
-export type ApplyReview = {
+export type MigrationReview = {
   request_id: string
   status: 'pending' | 'approved' | 'rejected'
+  target_execution_id?: string
   job_id?: number
   decisions: ReviewDecision[]
 }
@@ -61,31 +67,43 @@ export type MigrationJob = {
   failure_code?: string
 }
 
-function applyReviewPath(dbID: string, migrationID: string) {
+export type OperationReview = {
+  review: MigrationReview | null
+  plan: { sql: string; target_execution_id?: string } | null
+  unavailable_reason?: string
+}
+
+function reviewPath(dbID: string, migrationID: string) {
   return `/api/databases/${encodeURIComponent(dbID)}/migrations/${encodeURIComponent(migrationID)}/review`
 }
 
-export function getApplyReview(dbID: string, migrationID: string, revision: number, signal: AbortSignal) {
-  return apiFetch<{ review: ApplyReview | null }>(`${applyReviewPath(dbID, migrationID)}?revision=${revision}`, { signal, cache: 'no-store' })
+export function getOperationReview(
+  dbID: string, migrationID: string, revision: number, operation: MigrationOperation, signal: AbortSignal,
+) {
+  const query = new URLSearchParams({ revision: String(revision), operation })
+  return apiFetch<OperationReview>(`${reviewPath(dbID, migrationID)}?${query}`, { signal, cache: 'no-store' })
 }
 
-export function submitApplyReview(dbID: string, migrationID: string, revision: number, csrfToken: string, signal: AbortSignal) {
-  return apiFetch<ApplyReview>(applyReviewPath(dbID, migrationID), {
+export function submitOperationReview(
+  dbID: string, migrationID: string, input: { operation: MigrationOperation; revision: number; target_execution_id?: string },
+  csrfToken: string, signal: AbortSignal,
+) {
+  return apiFetch<MigrationReview>(reviewPath(dbID, migrationID), {
     method: 'POST', csrfToken, signal,
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation: 'apply', revision }),
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
 }
 
-export function decideApplyReview(
+export function decideOperationReview(
   requestID: string, groupID: number, decision: 'approved' | 'rejected', csrfToken: string, signal: AbortSignal,
 ) {
-  return apiFetch<ApplyReview>(`/api/migration-reviews/${encodeURIComponent(requestID)}/decision`, {
+  return apiFetch<MigrationReview>(`/api/migration-reviews/${encodeURIComponent(requestID)}/decision`, {
     method: 'POST', csrfToken, signal,
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupID, decision }),
   })
 }
 
-export function enqueueApplyReview(requestID: string, csrfToken: string, signal: AbortSignal) {
+export function enqueueOperationReview(requestID: string, csrfToken: string, signal: AbortSignal) {
   return apiFetch<{ id: number }>(`/api/migration-reviews/${encodeURIComponent(requestID)}/enqueue`, {
     method: 'POST', csrfToken, signal,
   })
@@ -95,4 +113,25 @@ export function getMigrationJob(dbID: string, jobID: number, signal: AbortSignal
   return apiFetch<MigrationJob>(`/api/databases/${encodeURIComponent(dbID)}/jobs/${jobID}`, {
     signal, cache: 'no-store',
   })
+}
+
+export type MigrationAttempt = {
+  id: number
+  migration_id: number
+  revision: number
+  execution_id: string
+  attempt_id: string
+  actor_id: number
+  operation: MigrationOperation
+  status: 'success' | 'failed'
+  executed_sql: string
+  error_message?: string
+  created_at: string
+}
+
+export function listAttemptHistory(dbID: string, hideRollback: string, signal: AbortSignal) {
+  const query = new URLSearchParams({ hide_rollback: hideRollback })
+  return apiFetch<{ entries: MigrationAttempt[] }>(
+    `/api/databases/${encodeURIComponent(dbID)}/migration-history?${query}`, { signal, cache: 'no-store' },
+  )
 }

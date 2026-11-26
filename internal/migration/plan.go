@@ -7,6 +7,7 @@ type Plan struct {
 	MigrationID           int64     `json:"migration_id"`
 	Revision              int       `json:"revision"`
 	SQL                   string    `json:"sql"`
+	TargetExecutionID     string    `json:"target_execution_id,omitempty"`
 	RollbackOfExecutionID *string   `json:"rollback_of_execution_id,omitempty"`
 }
 
@@ -47,20 +48,20 @@ func PlanRollback(m Migration, entries []HistoryEntry) (Plan, error) {
 	}
 	target := top.ExecutionID
 	return Plan{Operation: OpRollback, MigrationID: m.ID, Revision: m.Revision,
-		SQL: *m.DownSQL, RollbackOfExecutionID: &target}, nil
+		SQL: *m.DownSQL, TargetExecutionID: target, RollbackOfExecutionID: &target}, nil
 }
 
-func NextForward(entries []HistoryEntry) (int64, bool) {
-	var stack []int64
+func nextForward(entries []HistoryEntry) (HistoryEntry, bool) {
+	var stack []HistoryEntry
 	for _, e := range DedupeAttempts(entries) {
 		if e.Status != AttemptSucceeded {
 			continue
 		}
 		switch e.Operation {
 		case OpRollback:
-			stack = append(stack, e.MigrationID)
+			stack = append(stack, e)
 		case OpForward:
-			if n := len(stack); n > 0 && stack[n-1] == e.MigrationID {
+			if n := len(stack); n > 0 && stack[n-1].MigrationID == e.MigrationID {
 				stack = stack[:n-1]
 			}
 		case OpApply:
@@ -68,20 +69,23 @@ func NextForward(entries []HistoryEntry) (int64, bool) {
 		}
 	}
 	if len(stack) == 0 {
-		return 0, false
+		return HistoryEntry{}, false
 	}
 	return stack[len(stack)-1], true
 }
 
 func PlanForward(m Migration, entries []HistoryEntry) (Plan, error) {
-	id, ok := NextForward(entries)
+	target, ok := nextForward(entries)
 	if !ok {
 		return Plan{}, ErrNothingToForward
 	}
-	if id != m.ID {
+	if target.MigrationID != m.ID {
 		return Plan{}, ErrNotLatestActive
 	}
-	return Plan{Operation: OpForward, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL}, nil
+	if target.Revision != m.Revision {
+		return Plan{}, ErrImmutable
+	}
+	return Plan{Operation: OpForward, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL, TargetExecutionID: target.ExecutionID}, nil
 }
 
 // PlanApplyFor: apply hanya untuk migrasi yang belum pernah berhasil.

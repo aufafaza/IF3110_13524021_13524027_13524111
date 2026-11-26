@@ -34,7 +34,7 @@ function EditMigration({ dbID, migrationID }: { dbID: string; migrationID: strin
       <Link className="back-link" to={`/databases/${dbID}/migrations/${migrationID}`}>Back to migration</Link>
       <h1>Edit draft</h1>
       {request.status !== 'ready' ? <RequestFeedback request={request} loading="Loading draft…" /> :
-        request.data.can_edit && request.data.status === 'draft'
+        request.data.can_edit && request.data.status === 'draft' && !request.data.first_executed_at
           ? <Editor dbID={dbID} draft={request.data} />
           : <p role="alert">This migration cannot be edited.</p>}
     </>
@@ -47,6 +47,9 @@ function Editor({ dbID, draft }: { dbID: string; draft?: Migration }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<Preview>()
+  const [reversible, setReversible] = useState(!draft || !!draft.down_sql)
+  const [downSQL, setDownSQL] = useState(draft?.down_sql ?? '')
+  const [reason, setReason] = useState(draft?.irreversible_reason ?? '')
 
   async function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -54,13 +57,18 @@ function Editor({ dbID, draft }: { dbID: string; draft?: Migration }) {
     const values = new FormData(event.currentTarget)
     const action = event.nativeEvent.submitter?.getAttribute('value') ?? 'save'
     const input = { title: String(values.get('title') ?? ''), sql: String(values.get('sql') ?? ''), action }
+    if (action === 'save' && !(reversible ? downSQL.trim() : reason.trim())) {
+      setError(reversible ? 'Enter down SQL for this reversible migration.' : 'Explain why this migration is irreversible.')
+      return
+    }
     const migrationID = draft ? String(draft.id) : undefined
     setBusy(true)
     setError('')
     setPreview(undefined)
     try {
       if (action === 'save') {
-        const result = await migrationPost<Migration>(dbID, migrationID, state.session.csrf_token, input)
+        const definition = reversible ? { down_sql: downSQL } : { irreversible_reason: reason.trim() }
+        const result = await migrationPost<Migration>(dbID, migrationID, state.session.csrf_token, { ...input, ...definition })
         navigate(`/databases/${dbID}/migrations/${result.id}`)
       } else {
         setPreview(await migrationPost<Preview>(dbID, migrationID, state.session.csrf_token, input))
@@ -76,7 +84,21 @@ function Editor({ dbID, draft }: { dbID: string; draft?: Migration }) {
     <>
       <form className="editor-form" onSubmit={submit} onChange={() => setPreview(undefined)}>
         <label>Title<input name="title" required defaultValue={draft?.title} disabled={busy} /></label>
-        <label>SQL<textarea name="sql" rows={12} spellCheck={false} required defaultValue={draft?.sql} disabled={busy} /></label>
+        <label>Up SQL<textarea name="sql" rows={12} spellCheck={false} required defaultValue={draft?.sql} disabled={busy} /></label>
+        <label>
+          Reversibility
+          <select value={reversible ? 'reversible' : 'irreversible'} disabled={busy}
+            onChange={(event) => setReversible(event.target.value === 'reversible')}>
+            <option value="reversible">Reversible</option>
+            <option value="irreversible">Irreversible</option>
+          </select>
+        </label>
+        {reversible ? (
+          <label>Down SQL<textarea rows={6} spellCheck={false} value={downSQL} disabled={busy}
+            onChange={(event) => setDownSQL(event.target.value)} /></label>
+        ) : (
+          <label>Reason<input value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} /></label>
+        )}
         <div className="action-row">
           <button value="save" disabled={busy}>Save draft</button>
           <button className="button-secondary" value="preview" disabled={busy}>Preview</button>

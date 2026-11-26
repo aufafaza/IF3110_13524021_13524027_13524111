@@ -8,12 +8,13 @@ import (
 )
 
 type ApprovedOperation struct {
-	RequestID   string
-	ActorID     int64
-	DatabaseID  int64
-	MigrationID int64
-	Operation   Operation
-	Revision    string
+	RequestID         string
+	ActorID           int64
+	DatabaseID        int64
+	MigrationID       int64
+	Operation         Operation
+	Revision          string
+	TargetExecutionID string
 }
 
 func (s *Service) ApprovedApply(ctx context.Context, actorID, databaseID, migrationID int64) (Migration, Review, error) {
@@ -27,7 +28,7 @@ func (s *Service) ApprovedApply(ctx context.Context, actorID, databaseID, migrat
 	if err != nil {
 		return Migration{}, Review{}, err
 	}
-	review, err := s.approvals.ApprovedReview(ctx, m.ID, CurrentRevision(m), string(OpApply))
+	review, err := s.approvals.ApprovedReview(ctx, m.ID, CurrentRevision(m), string(OpApply), "")
 	if err != nil {
 		return Migration{}, Review{}, err
 	}
@@ -54,7 +55,7 @@ func (s *Service) PlanApproved(ctx context.Context, in ApprovedOperation, lock b
 	if CurrentRevision(m) != in.Revision {
 		return Plan{}, ErrRevisionChanged
 	}
-	review, err := s.approvals.ApprovedReview(ctx, m.ID, in.Revision, string(in.Operation))
+	review, err := s.approvals.ApprovedReview(ctx, m.ID, in.Revision, string(in.Operation), in.TargetExecutionID)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -65,8 +66,14 @@ func (s *Service) PlanApproved(ctx context.Context, in ApprovedOperation, lock b
 		return Plan{}, ErrNotDraft
 	}
 	plan, err := s.planForDefinition(ctx, m, in.Operation)
-	if err != nil || !lock {
-		return plan, err
+	if err != nil {
+		return Plan{}, err
+	}
+	if plan.TargetExecutionID != in.TargetExecutionID {
+		return Plan{}, ErrOperationTargetChanged
+	}
+	if !lock {
+		return plan, nil
 	}
 	locker, ok := s.repo.(interface {
 		LockDefinition(context.Context, int64, int64, int) error

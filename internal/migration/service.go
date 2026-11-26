@@ -207,7 +207,7 @@ func (s *Service) ExecuteOperation(ctx context.Context, userID, databaseID, migr
 		if err != nil {
 			return Migration{}, err
 		}
-		if _, err := s.approvals.ApprovedReview(ctx, migrationID, CurrentRevision(m), op); err != nil {
+		if _, err := s.approvals.ApprovedReview(ctx, migrationID, CurrentRevision(m), op, ""); err != nil {
 			return Migration{}, err
 		}
 	}

@@ -8,14 +8,15 @@ import (
 type Status string
 
 const (
-	StatusDraft   Status = "draft"
-	StatusApplied Status = "applied"
-	StatusFailed  Status = "failed"
+	StatusDraft      Status = "draft"
+	StatusApplied    Status = "applied"
+	StatusFailed     Status = "failed"
+	StatusRolledBack Status = "rolled_back"
 )
 
 func (s Status) IsValid() bool {
 	switch s {
-	case StatusDraft, StatusApplied, StatusFailed:
+	case StatusDraft, StatusApplied, StatusFailed, StatusRolledBack:
 		return true
 	default:
 		return false
@@ -50,23 +51,24 @@ type Migration struct {
 }
 
 var (
-	ErrNotFound            = errors.New("migration: not found")
-	ErrForbidden           = errors.New("migration: access denied")
-	ErrUnauthenticated     = errors.New("migration: unauthenticated")
-	ErrAlreadyApplied      = errors.New("migration: migration has already been applied")
-	ErrNotDraft            = errors.New("migration: only draft migrations can be modified or executed")
-	ErrEmptyTitle          = errors.New("migration: title must not be empty")
-	ErrEmptySQL            = errors.New("migration: SQL must not be empty")
-	ErrNonTransactionalSQL = errors.New("migration: statement cannot be executed inside a transaction")
-	ErrInvalidTransition   = errors.New("migration: invalid status transition")
-	ErrVersionConflict     = errors.New("migration: version conflict")
-	ErrConfirmationMissing = errors.New("migration: execution confirmation is required")
-	ErrNotLatestActive     = errors.New("migration: only the latest active migration can be rolled back")
-	ErrIrreversible        = errors.New("migration: migration is irreversible")
-	ErrImmutable           = errors.New("migration: definition is immutable after first execution")
-	ErrNothingToForward    = errors.New("migration: nothing to forward in linear order")
-	ErrInvalidDefinition   = errors.New("migration: provide either down SQL or an irreversible reason")
-	ErrRevisionMismatch    = errors.New("migration: revision does not match the approved revision")
-	ErrInvalidAttempt      = errors.New("migration: invalid attempt result")
-	ErrHistoryUnavailable  = errors.New("migration: history repository is not configured")
+	ErrNotFound               = errors.New("migration: not found")
+	ErrForbidden              = errors.New("migration: access denied")
+	ErrUnauthenticated        = errors.New("migration: unauthenticated")
+	ErrAlreadyApplied         = errors.New("migration: migration has already been applied")
+	ErrNotDraft               = errors.New("migration: only draft migrations can be modified or executed")
+	ErrEmptyTitle             = errors.New("migration: title must not be empty")
+	ErrEmptySQL               = errors.New("migration: SQL must not be empty")
+	ErrNonTransactionalSQL    = errors.New("migration: statement cannot be executed inside a transaction")
+	ErrInvalidTransition      = errors.New("migration: invalid status transition")
+	ErrVersionConflict        = errors.New("migration: version conflict")
+	ErrConfirmationMissing    = errors.New("migration: execution confirmation is required")
+	ErrNotLatestActive        = errors.New("migration: only the latest active migration can be rolled back")
+	ErrIrreversible           = errors.New("migration: migration is irreversible")
+	ErrImmutable              = errors.New("migration: definition is immutable after first execution")
+	ErrNothingToForward       = errors.New("migration: nothing to forward in linear order")
+	ErrInvalidDefinition      = errors.New("migration: provide either down SQL or an irreversible reason")
+	ErrOperationTargetChanged = errors.New("migration: execution position changed after review")
+	ErrRevisionMismatch       = errors.New("migration: revision does not match the approved revision")
+	ErrInvalidAttempt         = errors.New("migration: invalid attempt result")
+	ErrHistoryUnavailable     = errors.New("migration: history repository is not configured")
 )

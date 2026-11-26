@@ -14,6 +14,10 @@ const (
 	OpForward  Operation = "forward"
 )
 
+func (op Operation) IsOrdinary() bool {
+	return op == OpApply || op == OpRollback || op == OpForward
+}
+
 type AttemptStatus string
 
 const (

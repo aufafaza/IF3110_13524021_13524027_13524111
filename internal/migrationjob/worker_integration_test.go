@@ -61,10 +61,10 @@ func (f fixtureServices) Recheck(ctx context.Context, a Approval) error {
 	return nil
 }
 
-func (f fixtureServices) ResolveSQL(ctx context.Context, a Approval) (string, error) {
+func (f fixtureServices) ResolvePlan(ctx context.Context, a Approval) (migration.Plan, error) {
 	var sql string
 	err := f.pool.QueryRow(ctx, `SELECT sql FROM fixture_approvals WHERE id = $1`, a.RequestID).Scan(&sql)
-	return sql, err
+	return migration.Plan{SQL: sql}, err
 }
 
 func (f fixtureServices) ResolveBatch(ctx context.Context, a Approval) (BatchPlan, error) {

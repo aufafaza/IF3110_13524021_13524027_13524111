@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
 )
 
 type Store struct {
@@ -20,12 +22,12 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-const jobColumns = `id, execution_id::text, database_id, migration_id, revision, operation,
+const jobColumns = `id, execution_id::text, database_id, migration_id, revision, operation, target_execution_id,
 	state, attempt_count, coalesce(failure_code, ''), created_at, updated_at,
 	mode, scope_rows, committed_batches, committed_rows, batch_paused`
 
 func jobFields(j *Job) []any {
-	return []any{&j.ID, &j.ExecutionID, &j.DatabaseID, &j.MigrationID, &j.Revision, &j.Operation,
+	return []any{&j.ID, &j.ExecutionID, &j.DatabaseID, &j.MigrationID, &j.Revision, &j.Operation, &j.TargetExecutionID,
 		&j.State, &j.Attempts, &j.FailureCode, &j.CreatedAt, &j.UpdatedAt,
 		&j.Mode, &j.ScopeRows, &j.CommittedBatches, &j.CommittedRows, &j.BatchPaused}
 }
@@ -45,15 +47,16 @@ func (s *Store) enqueue(ctx context.Context, a Approval) (Job, error) {
 		a.Mode = Ordinary
 	}
 	if strings.TrimSpace(a.RequestID) == "" || strings.TrimSpace(a.Revision) == "" ||
-		a.ActorID <= 0 || a.DatabaseID <= 0 || a.MigrationID <= 0 || a.Operation != Apply ||
-		(a.Mode != Ordinary && a.Mode != Batch) {
-		return Job{}, errors.New("invalid approval for apply")
+		a.ActorID <= 0 || a.DatabaseID <= 0 || a.MigrationID <= 0 || !migration.Operation(a.Operation).IsOrdinary() ||
+		(a.Mode != Ordinary && (a.Mode != Batch || a.Operation != Apply)) ||
+		((a.Operation == Apply) != (a.TargetExecutionID == "")) {
+		return Job{}, errors.New("invalid approval for migration job")
 	}
 
 	_, err := s.pool.Exec(ctx, `INSERT INTO migration_async_jobs
-		(request_id, actor_id, database_id, migration_id, revision, operation, traceparent, tracestate, mode)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (request_id) DO NOTHING`,
-		a.RequestID, a.ActorID, a.DatabaseID, a.MigrationID, a.Revision, a.Operation, a.Traceparent, a.Tracestate, a.Mode)
+		(request_id, actor_id, database_id, migration_id, revision, operation, target_execution_id, traceparent, tracestate, mode)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (request_id) DO NOTHING`,
+		a.RequestID, a.ActorID, a.DatabaseID, a.MigrationID, a.Revision, a.Operation, a.TargetExecutionID, a.Traceparent, a.Tracestate, a.Mode)
 	if err != nil {
 		return Job{}, err
 	}
@@ -66,7 +69,7 @@ func (s *Store) enqueue(ctx context.Context, a Approval) (Job, error) {
 		return Job{}, err
 	}
 	if actorID != a.ActorID || j.DatabaseID != a.DatabaseID || j.MigrationID != a.MigrationID ||
-		j.Revision != a.Revision || j.Operation != a.Operation || j.Mode != a.Mode {
+		j.Revision != a.Revision || j.Operation != a.Operation || j.Mode != a.Mode || j.TargetExecutionID != a.TargetExecutionID {
 		return Job{}, ErrApprovalMismatch
 	}
 	return j, nil
@@ -113,6 +116,7 @@ func (s *Store) claim(ctx context.Context, lease time.Duration) (claim, error) {
 	}
 	c.approval.DatabaseID, c.approval.MigrationID = c.DatabaseID, c.MigrationID
 	c.approval.Revision, c.approval.Operation = c.Revision, c.Operation
+	c.approval.TargetExecutionID = c.TargetExecutionID
 	if c.Mode == Batch {
 		c.approval.Mode = c.Mode
 	}
@@ -130,6 +134,7 @@ type attempt struct {
 	retryable   bool
 	deliveredAt *time.Time
 	batchPlan   *BatchPlan
+	rollbackOf  *string
 }
 
 func (s *Store) currentAttempt(ctx context.Context, c claim) (attempt, error) {
@@ -138,9 +143,9 @@ func (s *Store) currentAttempt(ctx context.Context, c claim) (attempt, error) {
 		return a, nil
 	}
 	err := s.pool.QueryRow(ctx, `SELECT id::text, target_id::text, plan_hash, sql_snapshot, started_at,
-		finished_at, coalesce(failure_code, ''), retryable, delivered_at, batch_plan
+		finished_at, coalesce(failure_code, ''), retryable, delivered_at, batch_plan, rollback_of_execution_id
 		FROM migration_async_attempts WHERE job_id = $1 AND number = $2`, c.ID, c.Attempts).
-		Scan(&a.id, &a.targetID, &a.planHash, &a.sql, &a.startedAt, &a.finishedAt, &a.failureCode, &a.retryable, &a.deliveredAt, &a.batchPlan)
+		Scan(&a.id, &a.targetID, &a.planHash, &a.sql, &a.startedAt, &a.finishedAt, &a.failureCode, &a.retryable, &a.deliveredAt, &a.batchPlan, &a.rollbackOf)
 	return a, err
 }
 
@@ -155,16 +160,16 @@ func (s *Store) checkClaim(ctx context.Context, tx pgx.Tx, c claim) error {
 	return err
 }
 
-func (s *Store) startAttempt(ctx context.Context, c claim, targetID, planHash, sql string, batchPlan []byte) (attempt, error) {
+func (s *Store) startAttempt(ctx context.Context, c claim, targetID, planHash, sql string, batchPlan []byte, rollbackOf *string) (attempt, error) {
 	var a attempt
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := s.checkClaim(ctx, tx, c); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO migration_async_attempts
-			(job_id, number, target_id, plan_hash, sql_snapshot, batch_plan)
-			VALUES ($1, $2, $3::uuid, $4, $5, $6) RETURNING id::text, started_at`,
-			c.ID, c.Attempts+1, targetID, planHash, sql, batchPlan).Scan(&a.id, &a.startedAt); err != nil {
+			(job_id, number, target_id, plan_hash, sql_snapshot, batch_plan, rollback_of_execution_id)
+			VALUES ($1, $2, $3::uuid, $4, $5, $6, $7) RETURNING id::text, started_at`,
+			c.ID, c.Attempts+1, targetID, planHash, sql, batchPlan, rollbackOf).Scan(&a.id, &a.startedAt); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `UPDATE migration_async_jobs SET

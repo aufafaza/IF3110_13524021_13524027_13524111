@@ -42,7 +42,7 @@ func (w *Worker) processBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt
 			return err
 		}
 		hash := fmt.Sprintf("%x", sha256.Sum256(snapshot))
-		a, err = w.store.startAttempt(ctx, c, targetID, hash, plan.SQL, snapshot)
+		a, err = w.store.startAttempt(ctx, c, targetID, hash, plan.SQL, snapshot, nil)
 		if err != nil {
 			return err
 		}

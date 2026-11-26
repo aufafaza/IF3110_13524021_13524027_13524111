@@ -329,7 +329,11 @@ func (r *PostgresRepository) AppendHistory(ctx context.Context, a AttemptResult)
 
 func (r *PostgresRepository) ListHistoryEntries(ctx context.Context, databaseID int64) ([]HistoryEntry, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT `+historyColumns+` FROM migration_history WHERE database_id = $1 ORDER BY id`, databaseID)
+		`SELECT `+historyColumns+` FROM migration_history h WHERE database_id = $1
+		 ORDER BY (execution_id = 'exec-' || migration_id AND attempt_id = 'a1') DESC,
+		 CASE WHEN execution_id = 'exec-' || migration_id AND attempt_id = 'a1'
+		      THEN (SELECT version FROM migrations WHERE id = h.migration_id) END NULLS LAST,
+		 id`, databaseID)
 	if err != nil {
 		return nil, fmt.Errorf("migration: list history: %w", err)
 	}
