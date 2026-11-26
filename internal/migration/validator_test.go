@@ -85,6 +85,11 @@ func TestValidateSQLValidStatements(t *testing.T) {
 			wantStmts: 1,
 		},
 		{
+			name:      "escaped string with semicolon",
+			sql:       `SELECT E'it\'s; still a string'; SELECT 42;`,
+			wantStmts: 2,
+		},
+		{
 			name:      "case expression with END",
 			sql:       "SELECT CASE WHEN 1 = 1 THEN 'ok' ELSE 'no' END;",
 			wantStmts: 1,
@@ -124,6 +129,7 @@ func TestValidateSQLRejectsNonTransactional(t *testing.T) {
 		{"manual commit", "CREATE TABLE t (id int); COMMIT;"},
 		{"manual rollback", "CREATE TABLE t (id int); ROLLBACK;"},
 		{"manual start transaction", "START TRANSACTION; CREATE TABLE t (id int);"},
+		{"manual prepare transaction", "PREPARE TRANSACTION 'test';"},
 		{
 			"non-transactional as second statement",
 			"CREATE TABLE logs (id serial primary key, msg text);\nCREATE INDEX CONCURRENTLY idx_logs_msg ON logs(msg);",

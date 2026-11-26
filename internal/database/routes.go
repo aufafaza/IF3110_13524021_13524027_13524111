@@ -7,8 +7,8 @@ import (
 )
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux, guard *access.Guard) {
+	h.RegisterAPIRoutes(mux, guard)
 	admin := guard.RequireAdmin
-	view := guard.RequireDBAccess(access.LevelView)
 
 	mux.Handle("GET /admin/databases", admin(http.HandlerFunc(h.AdminListPage)))
 	mux.Handle("POST /admin/databases", admin(http.HandlerFunc(h.AdminCreate)))
@@ -18,11 +18,16 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux, guard *access.Guard) {
 	mux.Handle("POST /admin/databases/{id}/test", admin(http.HandlerFunc(h.AdminTestSaved)))
 	mux.Handle("POST /admin/databases/{id}/delete", admin(http.HandlerFunc(h.AdminDelete)))
 
-	mux.Handle("GET /databases", guard.RequireLogin(http.HandlerFunc(h.SelectPage)))
-	mux.Handle("GET /databases/{dbID}", view(http.HandlerFunc(h.TablesPage)))
-	mux.Handle("GET /databases/{dbID}/table", view(http.HandlerFunc(h.TablePage)))
-
 	mux.HandleFunc("GET /api/databases", h.listDatabasesAPI)
 	apiView := access.RequireDBAccess(h.checker, access.LevelView)
 	mux.Handle("GET /api/databases/{dbID}/tables", apiView(http.HandlerFunc(h.listTablesAPI)))
+	mux.Handle("GET /api/databases/{dbID}/schema", guard.RequireLogin(http.HandlerFunc(h.apiSchema)))
+	mux.Handle("GET /api/databases/{dbID}/table", apiView(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("data") == "true" {
+			h.tableRowsAPI(w, r)
+			return
+		}
+		h.tableInfoAPI(w, r)
+	})))
+	mux.Handle("GET /api/databases/{dbID}/table/rows", apiView(http.HandlerFunc(h.tableRowsAPI)))
 }

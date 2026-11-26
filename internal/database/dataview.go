@@ -12,15 +12,15 @@ const (
 )
 
 type Cell struct {
-	Text string
-	Null bool
+	Text string `json:"text"`
+	Null bool   `json:"null"`
 }
 
 type DataPage struct {
-	Columns []string
-	Rows    [][]Cell
-	Page    int
-	HasNext bool
+	Columns []string `json:"columns"`
+	Rows    [][]Cell `json:"rows"`
+	Page    int      `json:"page"`
+	HasNext bool     `json:"has_next"`
 }
 
 func (v *Viewer) Rows(ctx context.Context, dbID int64, schema, table string, page int) (dp DataPage, err error) {

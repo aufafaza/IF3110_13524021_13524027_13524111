@@ -38,7 +38,7 @@ func databaseRouter(t *testing.T, valid bool) http.Handler {
 }
 
 func TestDatabaseRoutes_AnonymousGetsJSONUnauthorized(t *testing.T) {
-	for _, path := range []string{"/databases", "/databases/1", "/databases/1/table?schema=a&table=b", "/admin/databases"} {
+	for _, path := range []string{"/api/databases", "/api/databases/1/tables", "/api/databases/1/table?schema=a&table=b", "/api/databases/1/table/rows?schema=a&table=b", "/admin/databases"} {
 		rec := httptest.NewRecorder()
 		databaseRouter(t, false).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		assertJSONAccessError(t, rec, http.StatusUnauthorized, "unauthenticated")
@@ -53,10 +53,10 @@ func TestDatabaseRoutes_NonAdminCannotManage(t *testing.T) {
 	assertJSONAccessError(t, rec, http.StatusForbidden, "forbidden")
 }
 
-func TestDatabaseRoutes_NoGrantIs404(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/databases/1", nil)
+func TestDatabaseRoutes_NoGrantIsForbidden(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/databases/1/tables", nil)
 	req.AddCookie(&http.Cookie{Name: testCookie, Value: "tok"})
 	rec := httptest.NewRecorder()
 	databaseRouter(t, true).ServeHTTP(rec, req)
-	assertJSONAccessError(t, rec, http.StatusNotFound, "not found")
+	assertJSONAccessError(t, rec, http.StatusForbidden, "forbidden: insufficient database permissions")
 }

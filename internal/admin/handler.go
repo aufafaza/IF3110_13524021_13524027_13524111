@@ -102,6 +102,32 @@ func (h *Handler) fail(w http.ResponseWriter, op string, err error) {
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
+func (h *Handler) apiSetLeader(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r, "id")
+	if !ok {
+		apiJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid group id"})
+		return
+	}
+	var in struct {
+		UserID int64 `json:"user_id"`
+	}
+	if !apiBody(w, r, &in) {
+		return
+	}
+	setter, ok := h.svc.(interface {
+		SetGroupLeader(context.Context, int64, int64) error
+	})
+	if !ok {
+		apiJSON(w, http.StatusNotImplemented, map[string]string{"error": "group leader management is unavailable"})
+		return
+	}
+	if err := setter.SetGroupLeader(r.Context(), id, in.UserID); err != nil {
+		apiError(w, err)
+		return
+	}
+	apiJSON(w, http.StatusOK, map[string]any{"group_id": id, "leader_user_id": in.UserID})
+}
+
 func (h *Handler) outcome(w http.ResponseWriter, op string, err error, success string) (notice, bool) {
 	if err == nil {
 		return notice{Message: success}, true

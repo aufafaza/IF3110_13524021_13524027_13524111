@@ -55,9 +55,9 @@ func checkNonTransactional(tokens []string) string {
 		return "CLUSTER cannot run inside a transaction block"
 	case "BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT":
 		return fmt.Sprintf("manual transaction control (%s) is not allowed; migrations run in a managed transaction", first)
-	case "START":
+	case "START", "PREPARE":
 		if len(tokens) >= 2 && tokens[1] == "TRANSACTION" {
-			return "manual transaction control (START TRANSACTION) is not allowed; migrations run in a managed transaction"
+			return fmt.Sprintf("manual transaction control (%s TRANSACTION) is not allowed; migrations run in a managed transaction", first)
 		}
 	case "ALTER":
 		if len(tokens) >= 2 && tokens[1] == "SYSTEM" {
@@ -133,7 +133,7 @@ func splitAndTokenize(sql string) []parsedStatement {
 
 		if ch == '-' && i+1 < n && sql[i+1] == '-' {
 			i += 2
-			for i < n && sql[i] != '\n' {
+			for i < n && sql[i] != '\n' && sql[i] != '\r' {
 				i++
 			}
 			continue
@@ -156,9 +156,17 @@ func splitAndTokenize(sql string) []parsedStatement {
 			continue
 		}
 
-		if ch == '\'' {
+		escaped := (ch == 'e' || ch == 'E') && i+1 < n && sql[i+1] == '\''
+		if ch == '\'' || escaped {
+			if escaped {
+				i++
+			}
 			i++
 			for i < n {
+				if escaped && sql[i] == '\\' && i+1 < n {
+					i += 2
+					continue
+				}
 				if sql[i] == '\'' {
 					i++
 					if i < n && sql[i] == '\'' {

@@ -10,19 +10,22 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/home"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migrationjob"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/middleware"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/static"
 )
 
 type Deps struct {
-	Auth         *auth.Handler
-	Home         *home.Handler
-	Admin        *admin.Handler
-	Authenticate *middleware.Authenticator
-	Guard        *access.Guard
-	Databases    *database.Handler  // optional; nil leaves the database routes out
-	Migrations   *migration.Handler // optional; nil leaves the migration routes out
+	Auth          *auth.Handler
+	Home          *home.Handler
+	Admin         *admin.Handler
+	Authenticate  *middleware.Authenticator
+	Guard         *access.Guard
+	Databases     *database.Handler  // optional; nil leaves the database routes out
+	Migrations    *migration.Handler // optional; nil leaves the migration routes out
+	MigrationJobs *migrationjob.Handler
 }
 
 func New(d Deps) http.Handler {
@@ -41,7 +44,11 @@ func New(d Deps) http.Handler {
 		d.Migrations.RegisterRoutes(mux)
 	}
 
-	return d.Authenticate.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux))
+	if d.MigrationJobs != nil {
+		d.MigrationJobs.RegisterRoutes(mux)
+	}
+
+	return d.Authenticate.Middleware(observability.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux)))
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {
