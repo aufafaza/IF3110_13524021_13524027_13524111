@@ -85,7 +85,7 @@ func PlanForward(m Migration, entries []HistoryEntry) (Plan, error) {
 }
 
 // PlanApplyFor: apply hanya untuk migrasi yang belum pernah berhasil.
-// Retry attempt gagal tetap lewat jalur ini (TODO: PIC 1 memberi attempt ID baru).
+// Retry attempt gagal tetap lewat jalur ini
 func PlanApplyFor(m Migration, entries []HistoryEntry) (Plan, error) {
 	chain, err := ActiveChain(entries)
 	if err != nil {

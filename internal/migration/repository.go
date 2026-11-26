@@ -346,3 +346,14 @@ func (r *PostgresRepository) ListHistoryEntries(ctx context.Context, databaseID 
 }
 
 var _ HistoryRepository = (*PostgresRepository)(nil)
+
+func (r *PostgresRepository) LockDefinition(ctx context.Context, databaseID, migrationID int64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE migrations SET first_executed_at = now()
+		 WHERE id = $1 AND database_id = $2 AND first_executed_at IS NULL`,
+		migrationID, databaseID)
+	if err != nil {
+		return fmt.Errorf("migration: lock definition: %w", err)
+	}
+	return nil
+}

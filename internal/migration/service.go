@@ -335,11 +335,18 @@ func validateAttempt(a AttemptResult) error {
 	return nil
 }
 
-// RecordAttempt dipanggil PIC 1. Idempoten per (execution_id, attempt_id):
+// RecordAttempt dipanggil Idempoten per (execution_id, attempt_id):
 // redelivery mengembalikan entri lama dengan created=false.
 func (s *Service) RecordAttempt(ctx context.Context, a AttemptResult) (HistoryEntry, bool, error) {
 	if s.history == nil {
 		return HistoryEntry{}, false, ErrHistoryUnavailable
+	}
+	if a.Revision == 0 {
+		m, err := s.repo.GetByID(ctx, a.DatabaseID, a.MigrationID)
+		if err != nil {
+			return HistoryEntry{}, false, err
+		}
+		a.Revision = m.Revision
 	}
 	if err := validateAttempt(a); err != nil {
 		return HistoryEntry{}, false, err
