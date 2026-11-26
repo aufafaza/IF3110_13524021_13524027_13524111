@@ -16,4 +16,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}", editGuard(http.HandlerFunc(h.handleUpdateOrPreview)))
 	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", editGuard(http.HandlerFunc(h.handleExplain)))
 	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", editGuard(http.HandlerFunc(h.handleExecute)))
+	mux.Handle("GET /databases/{dbID}/migration-history", viewGuard(http.HandlerFunc(h.handleListAttemptHistory)))
+	mux.Handle("POST /databases/{dbID}/migrations/{migrationID}/plan", editGuard(http.HandlerFunc(h.handlePlan)))
 }

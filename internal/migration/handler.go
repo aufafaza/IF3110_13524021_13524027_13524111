@@ -40,9 +40,11 @@ func (h *Handler) handleListHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type migrationInput struct {
-	Title  string `json:"title"`
-	SQL    string `json:"sql"`
-	Action string `json:"action"`
+	Title  				string `json:"title"`
+	SQL    				string `json:"sql"`
+	Action 				string `json:"action"`
+	DownSQL            *string `json:"down_sql"`
+	IrreversibleReason *string `json:"irreversible_reason"`
 }
 
 func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +59,13 @@ func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) 
 	if h.preview(w, r, user.ID, dbID, in) {
 		return
 	}
-	created, err := h.service.CreateDraft(r.Context(), user.ID, dbID, in.Title, in.SQL)
+	var created Migration
+	var err error
+	if in.DownSQL != nil || in.IrreversibleReason != nil {
+		created, err = h.service.CreateDraftWithDefinition(r.Context(), user.ID, dbID, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason)
+	} else {
+		created, err = h.service.CreateDraft(r.Context(), user.ID, dbID, in.Title, in.SQL)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -78,7 +86,13 @@ func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) 
 	if h.preview(w, r, user.ID, dbID, in) {
 		return
 	}
-	updated, err := h.service.UpdateDraft(r.Context(), user.ID, dbID, id, in.Title, in.SQL)
+	var updated Migration
+	var err error
+	if in.DownSQL != nil || in.IrreversibleReason != nil {
+		updated, err = h.service.UpdateDraftWithDefinition(r.Context(), user.ID, dbID, id, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason)
+	} else {
+		updated, err = h.service.UpdateDraft(r.Context(), user.ID, dbID, id, in.Title, in.SQL)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -240,11 +254,50 @@ func statusForError(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, ErrNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward):
+	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch):
 		return http.StatusConflict
-	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition):
+	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition), errors.Is(err, ErrInvalidAttempt):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func (h *Handler) handlePlan(w http.ResponseWriter, r *http.Request) {
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Operation Operation `json:"operation"`
+		Revision  int       `json:"revision"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	plan, err := h.service.PlanOperation(r.Context(), user.ID, dbID, id, in.Operation, in.Revision)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (h *Handler) handleListAttemptHistory(w http.ResponseWriter, r *http.Request) {
+	user, dbID, ok := h.requireUserAndDB(w, r)
+	if !ok {
+		return
+	}
+	hide, _ := strconv.ParseBool(r.URL.Query().Get("hide_rollback"))
+	entries, err := h.service.ListAttemptHistory(r.Context(), user.ID, dbID, hide)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if entries == nil {
+		entries = []HistoryEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"database_id": dbID, "hide_rollback": hide, "entries": entries,
+	})
 }
