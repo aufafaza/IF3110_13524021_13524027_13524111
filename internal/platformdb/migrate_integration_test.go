@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 	"testing/fstest"
+	"io/fs"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -66,8 +67,12 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 5 {
-		t.Errorf("schema_migrations rows = %d, want 5", n)
+	files, err := fs.Glob(migrations.Platform(), "*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(files) {
+		t.Errorf("schema_migrations rows = %d, want %d", n, len(files))
 	}
 }
 
