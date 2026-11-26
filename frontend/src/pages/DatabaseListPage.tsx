@@ -24,14 +24,14 @@ export function DatabaseListPage() {
   return (
     <>
       <h1>Databases</h1>
-      {error && <p role="alert">{error}</p>}
-      {!error && databases === null && <p role="status">Loading databases…</p>}
-      {databases?.length === 0 && <p>No databases available.</p>}
+      {error && <p className="feedback feedback-error" role="alert">{error}</p>}
+      {!error && databases === null && <p className="feedback" role="status">Loading databases…</p>}
+      {databases?.length === 0 && <p className="feedback">No databases available.</p>}
       {databases && databases.length > 0 && (
-        <ul>
+        <ul className="resource-list" role="list">
           {databases.map((database) => (
             <li key={database.id}>
-              <Link to={`/databases/${database.id}`}>{database.name}</Link>
+              <Link className="resource-link" to={`/databases/${database.id}`}>{database.name}</Link>
             </li>
           ))}
         </ul>

@@ -18,7 +18,7 @@ type (
 		Name     string  `json:"name"`
 		Type     string  `json:"type"`
 		Nullable bool    `json:"nullable"`
-		Default  *string `json:"default,omitempty"`
+		Default  *string `json:"default"`
 	}
 	Constraint struct {
 		Name       string `json:"name"`
