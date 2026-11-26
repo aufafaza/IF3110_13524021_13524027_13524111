@@ -86,7 +86,7 @@ func (w *Worker) report(ctx context.Context, c claim, a attempt) error {
 	outcome := Outcome{
 		Approval: c.approval, JobID: c.ID, ExecutionID: c.ExecutionID, AttemptID: a.id,
 		Attempt: c.Attempts, SQL: a.sql, StartedAt: a.startedAt, FinishedAt: *a.finishedAt,
-		FailureCode: a.failureCode,
+		FailureCode: a.failureCode, BatchPlan: a.batchPlan,
 	}
 	if err := w.history.Record(ctx, outcome); err != nil {
 		return w.deferStep(ctx, c, Reporting, "history_unavailable")
@@ -139,6 +139,10 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 		return w.deferStep(ctx, c, Reconciling, "target_identity_changed")
 	}
 
+	if c.Mode == Batch {
+		return w.processBatch(ctx, tx, c, a, targetID)
+	}
+
 	var evidence struct {
 		attemptID string
 		planHash  string
@@ -170,7 +174,7 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 		return w.store.reschedule(ctx, c, Failed, "invalid_plan", 0)
 	}
 	planHash := fmt.Sprintf("%x", sha256.Sum256([]byte(sql)))
-	a, err = w.store.startAttempt(ctx, c, targetID, planHash, sql)
+	a, err = w.store.startAttempt(ctx, c, targetID, planHash, sql, nil)
 	if err != nil {
 		return err
 	}

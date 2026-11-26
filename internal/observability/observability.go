@@ -189,7 +189,7 @@ func redactArgs(args []any) map[string]any {
 		// slices are therefore redacted by default; numeric values remain useful
 		// for diagnostics without exposing credentials or user data.
 		switch arg.(type) {
-		case string, []byte:
+		case string, []byte, []int64:
 			out[key] = "[REDACTED]"
 		default:
 			out[key] = arg
