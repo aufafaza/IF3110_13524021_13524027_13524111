@@ -83,6 +83,7 @@ function MigrationHistory({ dbID, migrations }: { dbID: string; migrations: Migr
                     <dt>Actor</dt><dd>#{attempt.actor_id}</dd>
                     <dt>Execution</dt><dd>{attempt.execution_id}</dd>
                     <dt>Attempt</dt><dd>{attempt.attempt_id}</dd>
+                    {attempt.recovery_of_execution_id && <><dt>Original execution</dt><dd>{attempt.recovery_of_execution_id}</dd></>}
                   </dl>
                   {attempt.error_message && <p className="feedback feedback-error">{attempt.error_message}</p>}
                   <pre className="sql-view" tabIndex={0}>{attempt.executed_sql}</pre>

@@ -65,7 +65,7 @@ func (s *Service) PlanApproved(ctx context.Context, in ApprovedOperation, lock b
 	if in.Operation == OpApply && m.Status != StatusDraft {
 		return Plan{}, ErrNotDraft
 	}
-	plan, err := s.planForDefinition(ctx, m, in.Operation)
+	plan, err := s.planReview(ctx, m, in.Operation, in.TargetExecutionID)
 	if err != nil {
 		return Plan{}, err
 	}

@@ -24,12 +24,12 @@ func NewStore(pool *pgxpool.Pool) *Store {
 
 const jobColumns = `id, execution_id::text, database_id, migration_id, revision, operation, target_execution_id,
 	state, attempt_count, coalesce(failure_code, ''), created_at, updated_at,
-	mode, scope_rows, committed_batches, committed_rows, batch_paused`
+	mode, scope_rows, committed_batches, committed_rows, batch_paused, compensated_batches, compensated_rows`
 
 func jobFields(j *Job) []any {
 	return []any{&j.ID, &j.ExecutionID, &j.DatabaseID, &j.MigrationID, &j.Revision, &j.Operation, &j.TargetExecutionID,
 		&j.State, &j.Attempts, &j.FailureCode, &j.CreatedAt, &j.UpdatedAt,
-		&j.Mode, &j.ScopeRows, &j.CommittedBatches, &j.CommittedRows, &j.BatchPaused}
+		&j.Mode, &j.ScopeRows, &j.CommittedBatches, &j.CommittedRows, &j.BatchPaused, &j.CompensatedBatches, &j.CompensatedRows}
 }
 
 func (s *Store) Get(ctx context.Context, databaseID, jobID int64) (Job, error) {
@@ -46,9 +46,11 @@ func (s *Store) enqueue(ctx context.Context, a Approval) (Job, error) {
 	if a.Mode == "" {
 		a.Mode = Ordinary
 	}
+	op := migration.Operation(a.Operation)
+	validMode := op.IsOrdinary() && (a.Mode == Ordinary || (op == migration.OpApply && a.Mode == Batch)) ||
+		op.IsRecovery() && a.Mode == Batch
 	if strings.TrimSpace(a.RequestID) == "" || strings.TrimSpace(a.Revision) == "" ||
-		a.ActorID <= 0 || a.DatabaseID <= 0 || a.MigrationID <= 0 || !migration.Operation(a.Operation).IsOrdinary() ||
-		(a.Mode != Ordinary && (a.Mode != Batch || a.Operation != Apply)) ||
+		a.ActorID <= 0 || a.DatabaseID <= 0 || a.MigrationID <= 0 || !validMode ||
 		((a.Operation == Apply) != (a.TargetExecutionID == "")) {
 		return Job{}, errors.New("invalid approval for migration job")
 	}
@@ -84,25 +86,47 @@ type claim struct {
 	batchPending  bool
 }
 
+const terminalStates = `('succeeded', 'failed', 'recovered', 'compensated')`
+
+const ownsRecoveryRoot = `j.operation IN ('batch_recovery', 'compensation') AND EXISTS (
+	SELECT 1 FROM migration_async_jobs root
+	WHERE root.execution_id::text=j.target_execution_id AND root.database_id=j.database_id
+	  AND root.migration_id=j.migration_id AND root.owns_database AND root.batch_paused
+	  AND root.operation='apply' AND root.mode='batch'
+)`
+
+const holdsExecutionGate = `(j.owns_database OR (` + ownsRecoveryRoot + `))`
+
 func (s *Store) claim(ctx context.Context, lease time.Duration) (claim, error) {
 	var c claim
-	err := s.pool.QueryRow(ctx, `UPDATE migration_async_jobs SET
+	err := s.pool.QueryRow(ctx, `UPDATE migration_async_jobs j SET
 		claim_token = gen_random_uuid(), lease_until = clock_timestamp() + $1::bigint * interval '1 microsecond',
 		state = CASE WHEN state IN ('queued', 'retrying') THEN 'running' ELSE state END,
-		owns_database = true, updated_at = clock_timestamp()
+		owns_database = NOT (`+ownsRecoveryRoot+`), updated_at = clock_timestamp()
 		WHERE id = (
 			SELECT j.id FROM migration_async_jobs j
-			WHERE j.state NOT IN ('succeeded', 'failed') AND NOT j.batch_paused
+			WHERE j.state NOT IN `+terminalStates+` AND NOT j.batch_paused
 			  AND j.eligible_at <= clock_timestamp()
 			  AND (j.lease_until IS NULL OR j.lease_until <= clock_timestamp())
-			  AND (j.owns_database OR NOT EXISTS (
-				  SELECT 1 FROM migration_async_jobs earlier
-				  WHERE earlier.database_id = j.database_id AND earlier.id < j.id
-				    AND earlier.state NOT IN ('succeeded', 'failed')
-			  ))
+			  AND (
+				  (j.operation IN ('batch_recovery', 'compensation') AND NOT EXISTS (
+					  SELECT 1 FROM migration_async_jobs sibling
+					  WHERE sibling.database_id=j.database_id AND sibling.target_execution_id=j.target_execution_id
+					    AND sibling.operation IN ('batch_recovery', 'compensation') AND sibling.id<j.id
+					    AND sibling.state NOT IN `+terminalStates+` AND NOT sibling.batch_paused
+				  ))
+				  OR (j.operation NOT IN ('batch_recovery', 'compensation') AND (j.owns_database OR NOT EXISTS (
+					  SELECT 1 FROM migration_async_jobs earlier
+					  WHERE earlier.database_id=j.database_id AND earlier.id<j.id
+					    AND earlier.state NOT IN `+terminalStates+`
+				  )))
+			  )
 			  AND NOT EXISTS (
 				  SELECT 1 FROM migration_async_jobs owner
-				  WHERE owner.database_id = j.database_id AND owner.owns_database AND owner.id <> j.id
+				  WHERE owner.database_id=j.database_id AND owner.owns_database AND owner.id<>j.id
+				    AND (j.operation NOT IN ('batch_recovery', 'compensation')
+				      OR owner.execution_id::text<>j.target_execution_id
+				      OR owner.migration_id<>j.migration_id OR NOT owner.batch_paused)
 			  )
 			ORDER BY j.eligible_at, j.id
 			LIMIT 1 FOR UPDATE OF j SKIP LOCKED
@@ -151,8 +175,8 @@ func (s *Store) currentAttempt(ctx context.Context, c claim) (attempt, error) {
 
 func (s *Store) checkClaim(ctx context.Context, tx pgx.Tx, c claim) error {
 	var id int64
-	err := tx.QueryRow(ctx, `SELECT id FROM migration_async_jobs
-		WHERE id = $1 AND claim_token = $2::uuid AND lease_until > clock_timestamp() AND owns_database
+	err := tx.QueryRow(ctx, `SELECT id FROM migration_async_jobs j
+		WHERE id = $1 AND claim_token = $2::uuid AND lease_until > clock_timestamp() AND `+holdsExecutionGate+`
 		FOR UPDATE`, c.ID, c.token).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errClaimLost
@@ -214,13 +238,15 @@ func (s *Store) acknowledgeHistory(ctx context.Context, c claim, a attempt) erro
 		}
 
 		switch {
+		case a.failureCode == "" && migration.Operation(c.Operation).IsRecovery():
+			return s.settleRecovery(ctx, tx, c)
 		case a.failureCode == "":
 			return releaseClaim(ctx, tx, c, Succeeded, "", 0)
 		case c.Mode == Batch && c.CommittedBatches > 0:
 			if _, err := tx.Exec(ctx, `UPDATE migration_async_jobs SET batch_paused = true WHERE id = $1`, c.ID); err != nil {
 				return err
 			}
-			return releaseClaim(ctx, tx, c, Partial, a.failureCode, 0)
+			return releaseClaim(ctx, tx, c, batchState(c.CommittedBatches, c.CompensatedBatches, Partial), a.failureCode, 0)
 		case a.retryable && c.Attempts < c.attemptLimit:
 			return releaseClaim(ctx, tx, c, Retrying, a.failureCode, retryDelay*time.Duration(1<<(c.Attempts-1)))
 		default:
@@ -236,11 +262,11 @@ func (s *Store) reschedule(ctx context.Context, c claim, state State, code strin
 func releaseClaim(ctx context.Context, db interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }, c claim, state State, code string, delay time.Duration) error {
-	tag, err := db.Exec(ctx, `UPDATE migration_async_jobs SET
+	tag, err := db.Exec(ctx, `UPDATE migration_async_jobs j SET
 		state = $3, failure_code = nullif($4, ''), claim_token = NULL, lease_until = NULL,
-		owns_database = $3 NOT IN ('succeeded', 'failed'),
+		owns_database = owns_database AND $3 NOT IN `+terminalStates+`,
 		eligible_at = clock_timestamp() + $5::bigint * interval '1 microsecond', updated_at = clock_timestamp()
-		WHERE id = $1 AND claim_token = $2::uuid AND lease_until > clock_timestamp() AND owns_database`,
+		WHERE id = $1 AND claim_token = $2::uuid AND lease_until > clock_timestamp() AND `+holdsExecutionGate,
 		c.ID, c.token, state, code, delay.Microseconds())
 	if err != nil {
 		return fmt.Errorf("update migration job: %w", err)

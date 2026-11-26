@@ -18,7 +18,7 @@ type reviewSource struct {
 func approvalFromReview(review migration.Review) Approval {
 	return Approval{
 		RequestID: review.RequestID, ActorID: review.RequestedBy, DatabaseID: review.DatabaseID,
-		MigrationID: review.MigrationID, Revision: review.Revision, Operation: review.Operation, Mode: Ordinary,
+		MigrationID: review.MigrationID, Revision: review.Revision, Operation: review.Operation, Mode: review.Mode,
 		TargetExecutionID: review.TargetExecutionID,
 	}
 }
@@ -51,7 +51,8 @@ func (q *ReviewQueue) DispatchReview(ctx context.Context, review migration.Revie
 	if review.Status != migration.ReviewApproved {
 		return migration.QueueJob{}, migration.ErrQueueNotApproved
 	}
-	if !migration.Operation(review.Operation).IsOrdinary() || (review.Operation != Apply && review.TargetExecutionID == "") {
+	op := migration.Operation(review.Operation)
+	if (!op.IsOrdinary() && !op.IsRecovery()) || (op != migration.OpApply && review.TargetExecutionID == "") {
 		return migration.QueueJob{}, migration.ErrInvalidOperation
 	}
 	job, err := q.dispatcher.Dispatch(ctx, approvalFromReview(review))
@@ -114,11 +115,27 @@ func (s approvedWorkerServices) ResolvePlan(ctx context.Context, approved Approv
 		errors.Is(err, migration.ErrNonTransactionalSQL), errors.Is(err, migration.ErrEmptySQL),
 		errors.Is(err, migration.ErrNotLatestActive), errors.Is(err, migration.ErrNothingToForward),
 		errors.Is(err, migration.ErrIrreversible), errors.Is(err, migration.ErrImmutable),
-		errors.Is(err, migration.ErrOperationTargetChanged):
+		errors.Is(err, migration.ErrOperationTargetChanged), errors.Is(err, migration.ErrRecoveryUnavailable),
+		errors.Is(err, migration.ErrCompensationUnsafe), errors.Is(err, migration.ErrBatchDirection):
 		return migration.Plan{}, errors.Join(ErrIneligible, err)
 	default:
+		if err == nil && approved.Mode != "" && approved.Mode != plan.Mode() {
+			return migration.Plan{}, ErrIneligible
+		}
 		return plan, err
 	}
+}
+
+func (s approvedWorkerServices) ResolveBatch(ctx context.Context, approved Approval) (BatchPlan, error) {
+	plan, err := s.ResolvePlan(ctx, approved)
+	if err != nil {
+		return BatchPlan{}, err
+	}
+	if plan.BatchConfig == nil {
+		return BatchPlan{}, ErrIneligible
+	}
+	return BatchPlan{Size: plan.BatchConfig.Size, ScopeSQL: plan.BatchConfig.ScopeSQL,
+		SQL: plan.SQL, Recovery: plan.BatchConfig.Recovery}, nil
 }
 
 func (s approvedWorkerServices) Record(ctx context.Context, outcome Outcome) error {
@@ -128,6 +145,9 @@ func (s approvedWorkerServices) Record(ctx context.Context, outcome Outcome) err
 		Operation: migration.Operation(outcome.Operation), Status: migration.AttemptSucceeded,
 		ActorID: outcome.ActorID, ExecutedSQL: outcome.SQL, At: outcome.FinishedAt,
 		RollbackOfExecutionID: outcome.RollbackOfExecutionID,
+	}
+	if migration.Operation(outcome.Operation).IsRecovery() {
+		result.RecoveryOfExecutionID = &outcome.TargetExecutionID
 	}
 	if outcome.FailureCode != "" {
 		result.Status = migration.AttemptFailed

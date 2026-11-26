@@ -52,11 +52,13 @@ func (h *Handler) handleListHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type migrationInput struct {
-	Title              string  `json:"title"`
-	SQL                string  `json:"sql"`
-	Action             string  `json:"action"`
-	DownSQL            *string `json:"down_sql"`
-	IrreversibleReason *string `json:"irreversible_reason"`
+	Title              string       `json:"title"`
+	SQL                string       `json:"sql"`
+	Action             string       `json:"action"`
+	DownSQL            *string      `json:"down_sql"`
+	IrreversibleReason *string      `json:"irreversible_reason"`
+	BatchConfig        *BatchConfig `json:"batch_config"`
+	Mode               string       `json:"mode"`
 }
 
 func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +75,13 @@ func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	var created Migration
 	var err error
-	if in.DownSQL != nil || in.IrreversibleReason != nil {
+	if in.Mode != "" || in.BatchConfig != nil {
+		if !validBatchInputMode(in) {
+			writeError(w, ErrInvalidBatch)
+			return
+		}
+		created, err = h.service.CreateDraftWithBatchConfig(r.Context(), user.ID, dbID, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason, in.BatchConfig)
+	} else if in.DownSQL != nil || in.IrreversibleReason != nil {
 		created, err = h.service.CreateDraftWithDefinition(r.Context(), user.ID, dbID, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason)
 	} else {
 		created, err = h.service.CreateDraft(r.Context(), user.ID, dbID, in.Title, in.SQL)
@@ -100,7 +108,13 @@ func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	var updated Migration
 	var err error
-	if in.DownSQL != nil || in.IrreversibleReason != nil {
+	if in.Mode != "" || in.BatchConfig != nil {
+		if !validBatchInputMode(in) {
+			writeError(w, ErrInvalidBatch)
+			return
+		}
+		updated, err = h.service.UpdateDraftWithBatchConfig(r.Context(), user.ID, dbID, id, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason, in.BatchConfig, true)
+	} else if in.DownSQL != nil || in.IrreversibleReason != nil {
 		updated, err = h.service.UpdateDraftWithDefinition(r.Context(), user.ID, dbID, id, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason)
 	} else {
 		updated, err = h.service.UpdateDraft(r.Context(), user.ID, dbID, id, in.Title, in.SQL)
@@ -110,6 +124,19 @@ func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func validBatchInputMode(in migrationInput) bool {
+	switch in.Mode {
+	case "":
+		return true
+	case "ordinary":
+		return in.BatchConfig == nil
+	case "batch":
+		return in.BatchConfig != nil
+	default:
+		return false
+	}
 }
 
 func (h *Handler) preview(w http.ResponseWriter, r *http.Request, userID, dbID int64, in migrationInput) bool {
@@ -415,7 +442,7 @@ func statusForError(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrReviewNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch), errors.Is(err, ErrOperationTargetChanged):
+	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch), errors.Is(err, ErrOperationTargetChanged), errors.Is(err, ErrRecoveryUnavailable), errors.Is(err, ErrCompensationUnsafe), errors.Is(err, ErrBatchDirection):
 		return http.StatusConflict
 	case errors.Is(err, ErrReviewClosed), errors.Is(err, ErrRevisionChanged), errors.Is(err, ErrApprovalRequired), errors.Is(err, ErrQueueNotApproved):
 		return http.StatusConflict
@@ -423,7 +450,7 @@ func statusForError(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrReviewGroupRequired), errors.Is(err, ErrInvalidDecision):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition), errors.Is(err, ErrInvalidAttempt):
+	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition), errors.Is(err, ErrInvalidAttempt), errors.Is(err, ErrInvalidBatch):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

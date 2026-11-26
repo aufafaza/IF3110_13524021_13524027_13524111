@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -39,6 +40,7 @@ type Review struct {
 	DatabaseID        int64            `json:"database_id"`
 	Revision          string           `json:"revision"`
 	Operation         string           `json:"operation"`
+	Mode              string           `json:"mode"`
 	TargetExecutionID string           `json:"target_execution_id,omitempty"`
 	RequestedBy       int64            `json:"requested_by"`
 	Status            ReviewStatus     `json:"status"`
@@ -63,6 +65,7 @@ type SubmitReviewParams struct {
 	DatabaseID         int64
 	Revision           string
 	Operation          string
+	Mode               string
 	RequestedBy        int64
 	DefinitionRevision int
 	TargetExecutionID  string
@@ -185,7 +188,7 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 		_, err := tx.Exec(ctx, `UPDATE migration_review_requests q SET superseded_at=clock_timestamp()
 			FROM migration_async_jobs j
 			WHERE q.migration_id=$1 AND q.revision=$2 AND q.operation=$3 AND q.target_execution_id=$4
-			  AND q.superseded_at IS NULL AND q.async_job_id=j.id AND j.state='failed'`,
+			  AND q.superseded_at IS NULL AND q.async_job_id=j.id AND (j.state='failed' OR j.batch_paused)`,
 			p.MigrationID, p.Revision, op, p.TargetExecutionID)
 		if err != nil {
 			return Review{}, fmt.Errorf("migration: retire failed operation review: %w", err)
@@ -194,9 +197,9 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 
 	requestID := newRequestID()
 	tag, err := tx.Exec(ctx, `INSERT INTO migration_review_requests
-		(request_id,migration_id,revision,operation,requested_by,target_execution_id)
-		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (migration_id,revision,operation,target_execution_id) WHERE superseded_at IS NULL DO NOTHING`,
-		requestID, p.MigrationID, p.Revision, op, p.RequestedBy, p.TargetExecutionID)
+		(request_id,migration_id,revision,operation,requested_by,target_execution_id,mode)
+		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (migration_id,revision,operation,target_execution_id) WHERE superseded_at IS NULL DO NOTHING`,
+		requestID, p.MigrationID, p.Revision, op, p.RequestedBy, p.TargetExecutionID, p.Mode)
 	if err != nil {
 		return Review{}, fmt.Errorf("migration: create review: %w", err)
 	}
@@ -234,12 +237,12 @@ func (r *PostgresApprovalRepository) FindByRevision(ctx context.Context, migrati
 }
 
 const reviewColumns = `q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,
-	q.target_execution_id,q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id`
+	q.target_execution_id,q.mode,q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id`
 
 func (r *PostgresApprovalRepository) GetReview(ctx context.Context, requestID string) (Review, error) {
 	var out Review
 	var status string
-	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &out.TargetExecutionID, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID)
+	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &out.TargetExecutionID, &out.Mode, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrReviewNotFound
 	}
@@ -326,10 +329,10 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 	// Lock the reviewed definition until the decision commits. A concurrent
 	// edit can revoke the approval afterward, but cannot race this check.
 	var definition Migration
-	err = tx.QueryRow(ctx, `SELECT m.title,m.sql,m.down_sql,m.irreversible_reason
+	err = tx.QueryRow(ctx, `SELECT m.title,m.sql,m.down_sql,m.irreversible_reason,m.batch_config
 		FROM migrations m JOIN migration_review_requests q ON q.migration_id=m.id
 		WHERE q.request_id=$1 FOR SHARE OF m`, requestID).
-		Scan(&definition.Title, &definition.SQL, &definition.DownSQL, &definition.IrreversibleReason)
+		Scan(&definition.Title, &definition.SQL, &definition.DownSQL, &definition.IrreversibleReason, &definition.BatchConfig)
 	if err != nil {
 		return Review{}, err
 	}
@@ -381,10 +384,10 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 }
 
 func (r *PostgresApprovalRepository) PendingApprovedOperations(ctx context.Context) ([]Review, error) {
-	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,q.target_execution_id
+	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,q.target_execution_id,q.mode
 		FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id
 		WHERE q.status='approved' AND q.async_job_id IS NULL AND q.superseded_at IS NULL
-		  AND (q.operation='apply' OR (q.operation IN ('rollback','forward') AND q.target_execution_id<>''))
+		  AND (q.operation='apply' OR (q.operation IN ('rollback','forward','batch_recovery','compensation') AND q.target_execution_id<>''))
 		ORDER BY q.decided_at, q.request_id`)
 	if err != nil {
 		return nil, err
@@ -392,7 +395,7 @@ func (r *PostgresApprovalRepository) PendingApprovedOperations(ctx context.Conte
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Review, error) {
 		var review Review
 		err := row.Scan(&review.RequestID, &review.MigrationID, &review.DatabaseID, &review.Revision,
-			&review.Operation, &review.RequestedBy, &review.TargetExecutionID)
+			&review.Operation, &review.RequestedBy, &review.TargetExecutionID, &review.Mode)
 		return review, err
 	})
 }
@@ -452,6 +455,10 @@ func CurrentRevision(m Migration) string {
 	case m.IrreversibleReason != nil:
 		def += "irreversible:" + *m.IrreversibleReason
 	}
+	if m.BatchConfig != nil {
+		config, _ := json.Marshal(m.BatchConfig)
+		def += "\x00batch:" + string(config)
+	}
 	return Revision(m.Title, def)
 }
 
@@ -473,7 +480,7 @@ func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migratio
 	if revision != 0 && revision != m.Revision {
 		return Review{}, ErrRevisionMismatch
 	}
-	plan, err := s.planReview(ctx, m, Operation(op))
+	plan, err := s.planReview(ctx, m, Operation(op), targetExecutionID)
 	if err != nil {
 		return Review{}, err
 	}
@@ -482,7 +489,7 @@ func (s *Service) SubmitReview(ctx context.Context, userID, databaseID, migratio
 	}
 	return s.approvals.SubmitReview(ctx, SubmitReviewParams{
 		MigrationID: migrationID, DatabaseID: databaseID, Revision: CurrentRevision(m), Operation: op,
-		RequestedBy: userID, DefinitionRevision: m.Revision, TargetExecutionID: plan.TargetExecutionID,
+		RequestedBy: userID, DefinitionRevision: m.Revision, TargetExecutionID: plan.TargetExecutionID, Mode: plan.Mode(),
 	})
 }
 
@@ -506,7 +513,10 @@ type OperationReview struct {
 	UnavailableReason string  `json:"unavailable_reason,omitempty"`
 }
 
-func (s *Service) planReview(ctx context.Context, m Migration, op Operation) (Plan, error) {
+func (s *Service) planReview(ctx context.Context, m Migration, op Operation, executionID string) (Plan, error) {
+	if op.IsRecovery() {
+		return s.planRecovery(ctx, m, op, executionID)
+	}
 	if !op.IsOrdinary() {
 		return Plan{}, ErrInvalidOperation
 	}
@@ -531,19 +541,20 @@ func (s *Service) CurrentOperationReview(ctx context.Context, userID, databaseID
 		return OperationReview{}, ErrRevisionMismatch
 	}
 	op, err := normalizeOperation(operation)
-	if err != nil || !Operation(op).IsOrdinary() {
+	if err != nil || (!Operation(op).IsOrdinary() && !Operation(op).IsRecovery()) {
 		return OperationReview{}, ErrInvalidOperation
 	}
 
 	var result OperationReview
 	var target *string
-	plan, err := s.planReview(ctx, m, Operation(op))
+	plan, err := s.planReview(ctx, m, Operation(op), "")
 	switch {
 	case err == nil:
 		result.Plan = &plan
 		target = &plan.TargetExecutionID
 	case errors.Is(err, ErrNotDraft), errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrIrreversible),
-		errors.Is(err, ErrNothingToForward), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrImmutable):
+		errors.Is(err, ErrNothingToForward), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrImmutable),
+		errors.Is(err, ErrRecoveryUnavailable), errors.Is(err, ErrCompensationUnsafe), errors.Is(err, ErrBatchDirection):
 		result.UnavailableReason = err.Error()
 	default:
 		return OperationReview{}, err
@@ -585,7 +596,7 @@ func (s *Service) DecideReview(ctx context.Context, userID int64, requestID stri
 		if err != nil {
 			return Review{}, err
 		}
-		plan, err := s.planReview(ctx, m, Operation(review.Operation))
+		plan, err := s.planReview(ctx, m, Operation(review.Operation), review.TargetExecutionID)
 		if err != nil {
 			return Review{}, err
 		}

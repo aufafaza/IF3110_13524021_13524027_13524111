@@ -9,13 +9,19 @@ import (
 type Operation string
 
 const (
-	OpApply    Operation = "apply"
-	OpRollback Operation = "rollback"
-	OpForward  Operation = "forward"
+	OpApply         Operation = "apply"
+	OpRollback      Operation = "rollback"
+	OpForward       Operation = "forward"
+	OpBatchRecovery Operation = "batch_recovery"
+	OpCompensation  Operation = "compensation"
 )
 
 func (op Operation) IsOrdinary() bool {
 	return op == OpApply || op == OpRollback || op == OpForward
+}
+
+func (op Operation) IsRecovery() bool {
+	return op == OpBatchRecovery || op == OpCompensation
 }
 
 type AttemptStatus string
@@ -37,6 +43,7 @@ type HistoryEntry struct {
 	ActorID               int64         `json:"actor_id"`
 	ExecutedSQL           string        `json:"executed_sql"`
 	ErrorMessage          *string       `json:"error_message,omitempty"`
+	RecoveryOfExecutionID *string       `json:"recovery_of_execution_id,omitempty"`
 	RollbackOfExecutionID *string       `json:"rollback_of_execution_id,omitempty"`
 	CreatedAt             time.Time     `json:"created_at"`
 }
@@ -87,7 +94,7 @@ func VisibleHistory(entries []HistoryEntry, hide bool) []HistoryEntry {
 func ActiveChain(entries []HistoryEntry) ([]HistoryEntry, error) {
 	var chain []HistoryEntry
 	for _, e := range DedupeAttempts(entries) {
-		if e.Status != AttemptSucceeded {
+		if e.Status != AttemptSucceeded || e.Operation == OpCompensation {
 			continue
 		}
 		if e.Operation == OpRollback {

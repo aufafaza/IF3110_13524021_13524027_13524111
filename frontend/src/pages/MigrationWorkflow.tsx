@@ -14,6 +14,9 @@ const jobLabels: Record<MigrationJob['state'], string> = {
   reconciling: 'Checking the database',
   reporting: 'Saving execution history',
   partial: 'Partially applied',
+  partially_reverted: 'Partially reverted',
+  recovered: 'Resumed successfully',
+  compensated: 'Compensated',
   succeeded: 'Succeeded',
   failed: 'Failed',
 }
@@ -41,7 +44,8 @@ function useOperationStatus(dbID: string, migrationID: string, revision: number,
         setError('')
         setRevisionChanged(false)
         continuePolling = job
-          ? job.state !== 'succeeded' && job.state !== 'failed'
+          ? !['succeeded', 'failed', 'recovered', 'compensated'].includes(job.state)
+            && (!job.batch_paused || operation === 'apply')
           : (!!current.plan && review?.status === 'pending') || review?.status === 'approved'
       } catch (failure) {
         if (signal.aborted) return
@@ -88,11 +92,14 @@ type WorkflowProps = {
 
 export function MigrationWorkflow(props: WorkflowProps) {
   const [operation, setOperation] = useState<MigrationOperation>('apply')
+  const operations: MigrationOperation[] = props.migration.batch_config
+    ? ['apply', 'batch_recovery', 'compensation']
+    : ['apply', 'rollback', 'forward']
   return (
     <section aria-labelledby="migration-workflow">
       <h2 id="migration-workflow">Approval and execution</h2>
       <div className="action-row" role="group" aria-label="Migration operation">
-        {(Object.keys(operationLabels) as MigrationOperation[]).map((choice) => (
+        {operations.map((choice) => (
           <button key={choice} type="button" aria-pressed={operation === choice}
             className={operation === choice ? undefined : 'button-secondary'} onClick={() => setOperation(choice)}>
             {operationLabels[choice]}
@@ -139,23 +146,45 @@ function MigrationOperationPanel({ dbID, migrationID, migration, operation }: Wo
   const review = status?.review
   const plan = status?.plan
   const job = status?.job
-  const canRequestAgain = operation !== 'apply' && job?.state === 'failed'
+  const canRequestAgain = operation !== 'apply' && (job?.state === 'failed' || job?.batch_paused)
+  const operationLabel = operationLabels[operation].toLowerCase()
+  const unsafeCompensation = operation === 'compensation' &&
+    (job?.failure_code === 'compensation_unsafe' || status?.unavailable_reason?.includes('create a corrective migration'))
   const canEditDraft = operation === 'apply' && !revisionChanged && migration.can_edit && migration.status === 'draft' && !migration.first_executed_at
     && (!review || review.status !== 'approved')
 
   return (
     <>
-      {operation === 'rollback' && (plan?.sql || migration.down_sql) && (
+      {(operation === 'rollback' || operation === 'compensation') && (plan?.sql || migration.down_sql) && (
         <>
           <h3>Down SQL</h3>
           <pre className="sql-view" tabIndex={0}>{plan?.sql ?? migration.down_sql}</pre>
         </>
       )}
+      {operation === 'apply' && migration.batch_config && (
+        <details open={!!review && review.status === 'pending'}>
+          <summary>Batch scope and size</summary>
+          <p>{migration.batch_config.size} rows per batch</p>
+          {migration.batch_config.recovery && (
+            <p>Compensation snapshots use {migration.batch_config.recovery.schema}.{migration.batch_config.recovery.table}
+              {' · key '}{migration.batch_config.recovery.key}</p>
+          )}
+          <pre className="sql-view" tabIndex={0}>{migration.batch_config.scope_sql}</pre>
+        </details>
+      )}
       <dl className="migration-summary" aria-live="polite">
         <dt>Status</dt><dd>{workflowLabel(migration, operation, status)}</dd>
         {job && <><dt>Job</dt><dd>#{job.id}</dd><dt>Attempts</dt><dd>{job.attempts}</dd></>}
+        {job?.mode === 'batch' && (
+          <>
+            <dt>Committed</dt><dd>{job.committed_batches} batches · {job.committed_rows}{job.scope_rows !== undefined ? ` of ${job.scope_rows}` : ''} rows</dd>
+            {(job.compensated_batches > 0 || operation === 'compensation') && (
+              <><dt>Compensated</dt><dd>{job.compensated_batches} batches · {job.compensated_rows} rows</dd></>
+            )}
+          </>
+        )}
       </dl>
-      {job?.failure_code && (
+      {job?.failure_code && !unsafeCompensation && (
         <p className="feedback">
           {job.failure_code === 'ineligible'
             ? 'The approval, editing permissions, or execution order changed before execution.'
@@ -170,8 +199,15 @@ function MigrationOperationPanel({ dbID, migrationID, migration, operation }: Wo
             : <button type="button" onClick={() => setRefresh((count) => count + 1)}>Refresh status</button>}
         </div>
       )}
-      {!job && !plan && status?.unavailable_reason && operation !== 'apply' && (
+      {!unsafeCompensation && !job && !plan && status?.unavailable_reason && operation !== 'apply' && (
         <p className="feedback">{status.unavailable_reason.replace(/^migration: /, '')}</p>
+      )}
+      {unsafeCompensation && (
+        <p className="feedback feedback-error" role="alert">
+          Safe compensation is unavailable. {migration.can_edit && (
+            <Link to={`/databases/${dbID}/migrations/new`}>Create a corrective migration for review.</Link>
+          )}
+        </p>
       )}
       {actionError && <p className="feedback feedback-error" role="alert">{actionError}</p>}
       {!!review?.decisions.length && (
@@ -202,13 +238,13 @@ function MigrationOperationPanel({ dbID, migrationID, migration, operation }: Wo
       {status && (
         <div className="action-row">
           {canEditDraft && <Link to={`/databases/${dbID}/migrations/${migrationID}/edit`}>Edit draft</Link>}
-          {!revisionChanged && migration.can_edit && plan && (!review || canRequestAgain) && (
+          {!revisionChanged && migration.can_edit && plan && (!review || canRequestAgain) && !unsafeCompensation && (
             <button type="button" disabled={busy}
               onClick={() => void act((token, signal) => submitOperationReview(dbID, migrationID, {
                 operation, revision: migration.revision, target_execution_id: plan.target_execution_id,
               }, token, signal))}>
               {operation === 'apply' ? 'Submit for approval' : canRequestAgain
-                ? `Request another ${operation} review` : `Submit ${operation} for approval`}
+                ? `Request another review to ${operationLabel}` : `Request approval to ${operationLabel}`}
             </button>
           )}
           {!revisionChanged && migration.can_edit && plan && review?.status === 'approved' && !review.job_id && (

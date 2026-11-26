@@ -31,23 +31,24 @@ func (s Status) CanTransitionTo(next Status) bool {
 }
 
 type Migration struct {
-	ID                 int64      `json:"id"`
-	DatabaseID         int64      `json:"database_id"`
-	Version            *int       `json:"version,omitempty"`
-	Title              string     `json:"title"`
-	SQL                string     `json:"sql"`
-	Status             Status     `json:"status"`
-	DownSQL            *string    `json:"down_sql,omitempty"`
-	IrreversibleReason *string    `json:"irreversible_reason,omitempty"`
-	Revision           int        `json:"revision"`
-	FirstExecutedAt    *time.Time `json:"first_executed_at,omitempty"`
-	CreatedBy          int64      `json:"created_by"`
-	CreatedByUsername  string     `json:"created_by_username,omitempty"`
-	ExecutedBy         *int64     `json:"executed_by,omitempty"`
-	ExecutedByUsername *string    `json:"executed_by_username,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	ExecutedAt         *time.Time `json:"executed_at,omitempty"`
-	ErrorMessage       *string    `json:"error_message,omitempty"`
+	ID                 int64        `json:"id"`
+	DatabaseID         int64        `json:"database_id"`
+	Version            *int         `json:"version,omitempty"`
+	Title              string       `json:"title"`
+	SQL                string       `json:"sql"`
+	Status             Status       `json:"status"`
+	BatchConfig        *BatchConfig `json:"batch_config,omitempty"`
+	DownSQL            *string      `json:"down_sql,omitempty"`
+	IrreversibleReason *string      `json:"irreversible_reason,omitempty"`
+	Revision           int          `json:"revision"`
+	FirstExecutedAt    *time.Time   `json:"first_executed_at,omitempty"`
+	CreatedBy          int64        `json:"created_by"`
+	CreatedByUsername  string       `json:"created_by_username,omitempty"`
+	ExecutedBy         *int64       `json:"executed_by,omitempty"`
+	ExecutedByUsername *string      `json:"executed_by_username,omitempty"`
+	CreatedAt          time.Time    `json:"created_at"`
+	ExecutedAt         *time.Time   `json:"executed_at,omitempty"`
+	ErrorMessage       *string      `json:"error_message,omitempty"`
 }
 
 var (

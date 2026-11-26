@@ -3,12 +3,20 @@ package migration
 import "strings"
 
 type Plan struct {
-	Operation             Operation `json:"operation"`
-	MigrationID           int64     `json:"migration_id"`
-	Revision              int       `json:"revision"`
-	SQL                   string    `json:"sql"`
-	TargetExecutionID     string    `json:"target_execution_id,omitempty"`
-	RollbackOfExecutionID *string   `json:"rollback_of_execution_id,omitempty"`
+	BatchConfig           *BatchConfig `json:"batch_config,omitempty"`
+	Operation             Operation    `json:"operation"`
+	MigrationID           int64        `json:"migration_id"`
+	Revision              int          `json:"revision"`
+	SQL                   string       `json:"sql"`
+	TargetExecutionID     string       `json:"target_execution_id,omitempty"`
+	RollbackOfExecutionID *string      `json:"rollback_of_execution_id,omitempty"`
+}
+
+func (p Plan) Mode() string {
+	if p.BatchConfig != nil {
+		return "batch"
+	}
+	return "ordinary"
 }
 
 func ValidateDefinition(up string, down, reason *string) error {
@@ -28,7 +36,7 @@ func ValidateDefinition(up string, down, reason *string) error {
 }
 
 func PlanApply(m Migration) Plan {
-	return Plan{Operation: OpApply, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL}
+	return Plan{Operation: OpApply, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL, BatchConfig: m.BatchConfig}
 }
 
 func PlanRollback(m Migration, entries []HistoryEntry) (Plan, error) {
@@ -64,7 +72,7 @@ func nextForward(entries []HistoryEntry) (HistoryEntry, bool) {
 			if n := len(stack); n > 0 && stack[n-1].MigrationID == e.MigrationID {
 				stack = stack[:n-1]
 			}
-		case OpApply:
+		case OpApply, OpBatchRecovery:
 			stack = nil
 		}
 	}
@@ -101,7 +109,7 @@ func PlanApplyFor(m Migration, entries []HistoryEntry) (Plan, error) {
 		}
 	}
 	for _, e := range DedupeAttempts(entries) {
-		if e.MigrationID == m.ID && e.Status == AttemptSucceeded && e.Operation != OpRollback {
+		if e.MigrationID == m.ID && e.Status == AttemptSucceeded && e.Operation != OpRollback && e.Operation != OpCompensation {
 			return Plan{}, ErrNotDraft
 		}
 	}

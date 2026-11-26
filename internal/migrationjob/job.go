@@ -17,14 +17,17 @@ const (
 type State string
 
 const (
-	Queued      State = "queued"
-	Running     State = "running"
-	Reconciling State = "reconciling"
-	Reporting   State = "reporting"
-	Retrying    State = "retrying"
-	Partial     State = "partial"
-	Succeeded   State = "succeeded"
-	Failed      State = "failed"
+	Queued            State = "queued"
+	Running           State = "running"
+	Reconciling       State = "reconciling"
+	Reporting         State = "reporting"
+	Retrying          State = "retrying"
+	Partial           State = "partial"
+	PartiallyReverted State = "partially_reverted"
+	Recovered         State = "recovered"
+	Compensated       State = "compensated"
+	Succeeded         State = "succeeded"
+	Failed            State = "failed"
 )
 
 var (
@@ -65,6 +68,7 @@ type BatchPlans interface {
 }
 
 type BatchPlan struct {
+	Recovery *migration.BatchTable `json:",omitempty"`
 	ScopeSQL string
 	SQL      string
 	Size     int
@@ -89,23 +93,25 @@ type History interface {
 }
 
 type Job struct {
-	ID                int64     `json:"id"`
-	ExecutionID       string    `json:"execution_id"`
-	DatabaseID        int64     `json:"database_id"`
-	MigrationID       int64     `json:"migration_id"`
-	Revision          string    `json:"revision"`
-	Operation         string    `json:"operation"`
-	TargetExecutionID string    `json:"target_execution_id,omitempty"`
-	Mode              string    `json:"mode"`
-	ScopeRows         *int64    `json:"scope_rows,omitempty"`
-	CommittedBatches  int64     `json:"committed_batches"`
-	CommittedRows     int64     `json:"committed_rows"`
-	BatchPaused       bool      `json:"batch_paused,omitempty"`
-	State             State     `json:"state"`
-	Attempts          int       `json:"attempts"`
-	FailureCode       string    `json:"failure_code,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                 int64     `json:"id"`
+	ExecutionID        string    `json:"execution_id"`
+	DatabaseID         int64     `json:"database_id"`
+	MigrationID        int64     `json:"migration_id"`
+	Revision           string    `json:"revision"`
+	Operation          string    `json:"operation"`
+	TargetExecutionID  string    `json:"target_execution_id,omitempty"`
+	Mode               string    `json:"mode"`
+	ScopeRows          *int64    `json:"scope_rows,omitempty"`
+	CommittedBatches   int64     `json:"committed_batches"`
+	CompensatedBatches int64     `json:"compensated_batches"`
+	CompensatedRows    int64     `json:"compensated_rows"`
+	CommittedRows      int64     `json:"committed_rows"`
+	BatchPaused        bool      `json:"batch_paused,omitempty"`
+	State              State     `json:"state"`
+	Attempts           int       `json:"attempts"`
+	FailureCode        string    `json:"failure_code,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Dispatcher struct {

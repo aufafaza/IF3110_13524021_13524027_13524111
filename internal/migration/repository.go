@@ -16,16 +16,19 @@ type CreateDraftParams struct {
 	Title              string
 	SQL                string
 	DownSQL            *string
+	BatchConfig        *BatchConfig
 	IrreversibleReason *string
 	CreatedBy          int64
 }
 
 type UpdateDraftParams struct {
+	ReplaceBatchConfig bool
 	ID                 int64
 	DatabaseID         int64
 	Title              string
 	SQL                string
 	DownSQL            *string
+	BatchConfig        *BatchConfig
 	IrreversibleReason *string
 }
 
@@ -64,6 +67,7 @@ const selectMigrationColumns = `
 	m.sql,
 	m.down_sql,
 	m.irreversible_reason,
+	m.batch_config,
 	m.revision,
 	m.first_executed_at,
 	m.status,
@@ -93,6 +97,7 @@ func scanMigration(row pgx.Row) (Migration, error) {
 		&m.SQL,
 		&m.DownSQL,
 		&m.IrreversibleReason,
+		&m.BatchConfig,
 		&m.Revision,
 		&m.FirstExecutedAt,
 		&statusStr,
@@ -119,10 +124,10 @@ func (r *PostgresRepository) CreateDraft(ctx context.Context, params CreateDraft
 		reason = &noDown
 	}
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO migrations (database_id, title, sql, down_sql, irreversible_reason, status, created_by)
-		 VALUES ($1, $2, $3, $4, $5, 'draft', $6)
+		`INSERT INTO migrations (database_id, title, sql, down_sql, irreversible_reason, status, created_by, batch_config)
+		 VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7)
 		 RETURNING id`,
-		params.DatabaseID, params.Title, params.SQL, down, reason, params.CreatedBy,
+		params.DatabaseID, params.Title, params.SQL, down, reason, params.CreatedBy, params.BatchConfig,
 	).Scan(&id)
 	if err != nil {
 		return Migration{}, fmt.Errorf("migration: create draft: %w", err)
@@ -139,10 +144,11 @@ func (r *PostgresRepository) UpdateDraft(ctx context.Context, params UpdateDraft
 		                     THEN down_sql ELSE $3::text END,
 		     irreversible_reason = CASE WHEN $3::text IS NULL AND $4::text IS NULL
 		                                THEN irreversible_reason ELSE $4::text END,
-		     revision = revision + 1
+		     batch_config = CASE WHEN $7 THEN $8::jsonb ELSE batch_config END,
+			     revision = revision + 1
 		 WHERE id = $5 AND database_id = $6 AND status = 'draft'
 		 RETURNING id`,
-		params.Title, params.SQL, params.DownSQL, params.IrreversibleReason, params.ID, params.DatabaseID,
+		params.Title, params.SQL, params.DownSQL, params.IrreversibleReason, params.ID, params.DatabaseID, params.ReplaceBatchConfig, params.BatchConfig,
 	).Scan(&id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23000" {
@@ -280,6 +286,7 @@ type AttemptResult struct {
 	ExecutedSQL           string
 	ErrorMessage          *string
 	RollbackOfExecutionID *string
+	RecoveryOfExecutionID *string
 	At                    time.Time
 }
 
@@ -290,13 +297,13 @@ type HistoryRepository interface {
 }
 
 const historyColumns = `id, database_id, migration_id, revision, execution_id, attempt_id,
-	operation, status, actor_id, executed_sql, error_message, rollback_of_execution_id, created_at`
+	operation, status, actor_id, executed_sql, error_message, rollback_of_execution_id, recovery_of_execution_id, created_at`
 
 func scanHistory(row pgx.Row) (HistoryEntry, error) {
 	var e HistoryEntry
 	var op, st string
 	err := row.Scan(&e.ID, &e.DatabaseID, &e.MigrationID, &e.Revision, &e.ExecutionID, &e.AttemptID,
-		&op, &st, &e.ActorID, &e.ExecutedSQL, &e.ErrorMessage, &e.RollbackOfExecutionID, &e.CreatedAt)
+		&op, &st, &e.ActorID, &e.ExecutedSQL, &e.ErrorMessage, &e.RollbackOfExecutionID, &e.RecoveryOfExecutionID, &e.CreatedAt)
 	e.Operation, e.Status = Operation(op), AttemptStatus(st)
 	return e, err
 }
@@ -305,13 +312,13 @@ func (r *PostgresRepository) AppendHistory(ctx context.Context, a AttemptResult)
 	e, err := scanHistory(r.pool.QueryRow(ctx,
 		`INSERT INTO migration_history
 		   (database_id, migration_id, revision, execution_id, attempt_id, operation, status,
-		    actor_id, executed_sql, error_message, rollback_of_execution_id, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		    actor_id, executed_sql, error_message, rollback_of_execution_id, recovery_of_execution_id, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 ON CONFLICT (execution_id, attempt_id) DO NOTHING
 		 RETURNING `+historyColumns,
 		a.DatabaseID, a.MigrationID, a.Revision, a.ExecutionID, a.AttemptID,
 		string(a.Operation), string(a.Status), a.ActorID, a.ExecutedSQL,
-		a.ErrorMessage, a.RollbackOfExecutionID, a.At))
+		a.ErrorMessage, a.RollbackOfExecutionID, a.RecoveryOfExecutionID, a.At))
 	if err == nil {
 		return e, true, nil
 	}

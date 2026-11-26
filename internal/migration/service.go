@@ -237,6 +237,10 @@ func (s *Service) GetDetail(ctx context.Context, userID, databaseID, migrationID
 }
 
 func (s *Service) CreateDraftWithDefinition(ctx context.Context, userID, databaseID int64, title, up string, down, reason *string) (Migration, error) {
+	return s.CreateDraftWithBatchConfig(ctx, userID, databaseID, title, up, down, reason, nil)
+}
+
+func (s *Service) CreateDraftWithBatchConfig(ctx context.Context, userID, databaseID int64, title, up string, down, reason *string, batch *BatchConfig) (Migration, error) {
 	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Migration{}, err
 	}
@@ -245,15 +249,22 @@ func (s *Service) CreateDraftWithDefinition(ctx context.Context, userID, databas
 		return Migration{}, err
 	}
 	if err := ValidateDefinition(up, down, reason); err != nil {
+		return Migration{}, err
+	}
+	if err := ValidateBatchConfig(batch, up, down); err != nil {
 		return Migration{}, err
 	}
 	return s.repo.CreateDraft(ctx, CreateDraftParams{
 		DatabaseID: databaseID, Title: title, SQL: up,
-		DownSQL: down, IrreversibleReason: reason, CreatedBy: userID,
+		DownSQL: down, IrreversibleReason: reason, BatchConfig: batch, CreatedBy: userID,
 	})
 }
 
 func (s *Service) UpdateDraftWithDefinition(ctx context.Context, userID, databaseID, migrationID int64, title, up string, down, reason *string) (Migration, error) {
+	return s.UpdateDraftWithBatchConfig(ctx, userID, databaseID, migrationID, title, up, down, reason, nil, false)
+}
+
+func (s *Service) UpdateDraftWithBatchConfig(ctx context.Context, userID, databaseID, migrationID int64, title, up string, down, reason *string, batch *BatchConfig, replaceBatch bool) (Migration, error) {
 	if _, err := s.requireLevel(ctx, userID, databaseID, access.LevelEdit); err != nil {
 		return Migration{}, err
 	}
@@ -264,9 +275,12 @@ func (s *Service) UpdateDraftWithDefinition(ctx context.Context, userID, databas
 	if err := ValidateDefinition(up, down, reason); err != nil {
 		return Migration{}, err
 	}
+	if err := ValidateBatchConfig(batch, up, down); err != nil {
+		return Migration{}, err
+	}
 	return s.repo.UpdateDraft(ctx, UpdateDraftParams{
 		ID: migrationID, DatabaseID: databaseID, Title: title, SQL: up,
-		DownSQL: down, IrreversibleReason: reason,
+		DownSQL: down, IrreversibleReason: reason, BatchConfig: batch, ReplaceBatchConfig: replaceBatch,
 	})
 }
 
@@ -288,6 +302,9 @@ func (s *Service) PlanOperation(ctx context.Context, userID, databaseID, migrati
 }
 
 func (s *Service) planForDefinition(ctx context.Context, m Migration, op Operation) (Plan, error) {
+	if m.BatchConfig != nil && (op == OpRollback || op == OpForward) {
+		return Plan{}, ErrBatchDirection
+	}
 	entries, err := s.history.ListHistoryEntries(ctx, m.DatabaseID)
 	if err != nil {
 		return Plan{}, err
@@ -316,7 +333,7 @@ func (s *Service) planForDefinition(ctx context.Context, m Migration, op Operati
 
 func validateAttempt(a AttemptResult) error {
 	switch a.Operation {
-	case OpApply, OpRollback, OpForward:
+	case OpApply, OpRollback, OpForward, OpBatchRecovery, OpCompensation:
 	default:
 		return fmt.Errorf("%w: operation %q", ErrInvalidAttempt, a.Operation)
 	}
@@ -328,6 +345,9 @@ func validateAttempt(a AttemptResult) error {
 	if a.DatabaseID <= 0 || a.MigrationID <= 0 || a.ActorID <= 0 || a.Revision <= 0 ||
 		a.ExecutionID == "" || a.AttemptID == "" || strings.TrimSpace(a.ExecutedSQL) == "" {
 		return fmt.Errorf("%w: missing required field", ErrInvalidAttempt)
+	}
+	if a.Operation.IsRecovery() != (a.RecoveryOfExecutionID != nil) {
+		return fmt.Errorf("%w: recovery target must be set for batch recovery", ErrInvalidAttempt)
 	}
 	isCommittedRollback := a.Operation == OpRollback && a.Status == AttemptSucceeded
 	if isCommittedRollback != (a.RollbackOfExecutionID != nil) {

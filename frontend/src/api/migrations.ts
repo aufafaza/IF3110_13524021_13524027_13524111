@@ -1,5 +1,11 @@
 import { apiFetch } from '@/api/client'
 
+export type BatchConfig = {
+  scope_sql: string
+  size: number
+  recovery?: { schema: string; table: string; key: string }
+}
+
 export type Migration = {
   id: number
   title: string
@@ -7,6 +13,7 @@ export type Migration = {
   version?: number
   sql: string
   down_sql?: string
+  batch_config?: BatchConfig
   irreversible_reason?: string
   created_at: string
   executed_at?: string
@@ -41,7 +48,9 @@ export function migrationPost<T>(
   })
 }
 
-export const operationLabels = { apply: 'Apply', rollback: 'Rollback', forward: 'Forward' } as const
+export const operationLabels = {
+  apply: 'Apply', rollback: 'Rollback', forward: 'Forward', batch_recovery: 'Resume batch', compensation: 'Compensate batches',
+} as const
 export type MigrationOperation = keyof typeof operationLabels
 
 export type ReviewDecision = {
@@ -63,6 +72,14 @@ export type MigrationReview = {
 export type MigrationJob = {
   id: number
   state: 'queued' | 'running' | 'retrying' | 'reconciling' | 'reporting' | 'partial' | 'succeeded' | 'failed'
+    | 'partially_reverted' | 'recovered' | 'compensated'
+  mode: 'ordinary' | 'batch'
+  batch_paused?: boolean
+  scope_rows?: number
+  committed_batches: number
+  committed_rows: number
+  compensated_batches: number
+  compensated_rows: number
   attempts: number
   failure_code?: string
 }
@@ -120,6 +137,7 @@ export type MigrationAttempt = {
   migration_id: number
   revision: number
   execution_id: string
+  recovery_of_execution_id?: string
   attempt_id: string
   actor_id: number
   operation: MigrationOperation

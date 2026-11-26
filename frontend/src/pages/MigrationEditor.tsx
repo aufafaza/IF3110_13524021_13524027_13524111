@@ -1,6 +1,6 @@
 import { useState, type SubmitEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { getMigration, listMigrations, migrationPost, type Migration, type Preview } from '@/api/migrations'
+import { getMigration, listMigrations, migrationPost, type BatchConfig, type Migration, type Preview } from '@/api/migrations'
 import { useRequest } from '@/api/useRequest'
 import { useAuth } from '@/auth/useAuth'
 import { RequestFeedback } from '@/components/RequestFeedback'
@@ -50,6 +50,8 @@ function Editor({ dbID, draft }: { dbID: string; draft?: Migration }) {
   const [reversible, setReversible] = useState(!draft || !!draft.down_sql)
   const [downSQL, setDownSQL] = useState(draft?.down_sql ?? '')
   const [reason, setReason] = useState(draft?.irreversible_reason ?? '')
+  const [batched, setBatched] = useState(!!draft?.batch_config)
+  const [saveSnapshots, setSaveSnapshots] = useState(!!draft?.batch_config?.recovery)
 
   async function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -68,7 +70,29 @@ function Editor({ dbID, draft }: { dbID: string; draft?: Migration }) {
     try {
       if (action === 'save') {
         const definition = reversible ? { down_sql: downSQL } : { irreversible_reason: reason.trim() }
-        const result = await migrationPost<Migration>(dbID, migrationID, state.session.csrf_token, { ...input, ...definition })
+        let batchConfig: BatchConfig | undefined
+        if (batched) {
+          const scope = String(values.get('scope_sql') ?? '').trim()
+          const size = Number(values.get('batch_size'))
+          if (!scope || !Number.isInteger(size) || size < 1 || size > 10000) {
+            setError('Enter scope SQL and a batch size between 1 and 10,000.')
+            return
+          }
+          batchConfig = { scope_sql: scope, size }
+          if (reversible && saveSnapshots) {
+            const schema = String(values.get('recovery_schema') ?? '').trim()
+            const table = String(values.get('recovery_table') ?? '').trim()
+            const key = String(values.get('recovery_key') ?? '').trim()
+            if (!schema || !table || !key) {
+              setError('Enter the schema, table, and key to record compensation snapshots.')
+              return
+            }
+            batchConfig.recovery = { schema, table, key }
+          }
+        }
+        const result = await migrationPost<Migration>(dbID, migrationID, state.session.csrf_token, {
+          ...input, ...definition, mode: batched ? 'batch' : 'ordinary', batch_config: batchConfig,
+        })
         navigate(`/databases/${dbID}/migrations/${result.id}`)
       } else {
         setPreview(await migrationPost<Preview>(dbID, migrationID, state.session.csrf_token, input))
@@ -99,11 +123,53 @@ function Editor({ dbID, draft }: { dbID: string; draft?: Migration }) {
         ) : (
           <label>Reason<input value={reason} disabled={busy} onChange={(event) => setReason(event.target.value)} /></label>
         )}
+        <label>
+          Execution mode
+          <select value={batched ? 'batch' : 'ordinary'} disabled={busy}
+            onChange={(event) => setBatched(event.target.value === 'batch')}>
+            <option value="ordinary">Ordinary</option>
+            <option value="batch">Batched</option>
+          </select>
+        </label>
+        {batched && (
+          <>
+            <p>Up SQL and down SQL each use one UPDATE with the batch’s bigint[] keys in <code>$1</code>.
+              Return the updated key for every row.</p>
+            <label>Scope SQL
+              <textarea name="scope_sql" rows={4} spellCheck={false} disabled={busy} defaultValue={draft?.batch_config?.scope_sql}
+                placeholder="SELECT id AS key FROM public.orders WHERE needs_update" />
+            </label>
+            <label>Rows per batch
+              <input name="batch_size" type="number" min={1} max={10000} step={1} disabled={busy}
+                defaultValue={draft?.batch_config?.size ?? 1000} />
+            </label>
+            {reversible && (
+              <>
+                <label className="checkbox-label">
+                  <input type="checkbox" checked={saveSnapshots} disabled={busy}
+                    onChange={(event) => setSaveSnapshots(event.target.checked)} />
+                  Record row snapshots for compensation
+                </label>
+                {saveSnapshots && (
+                  <>
+                    <label>Schema<input name="recovery_schema" defaultValue={draft?.batch_config?.recovery?.schema ?? 'public'} /></label>
+                    <label>Table<input name="recovery_table" defaultValue={draft?.batch_config?.recovery?.table} /></label>
+                    <label>Key column<input name="recovery_key" defaultValue={draft?.batch_config?.recovery?.key ?? 'id'} /></label>
+                  </>
+                )}
+              </>
+            )}
+          </>
+        )}
         <div className="action-row">
           <button value="save" disabled={busy}>Save draft</button>
           <button className="button-secondary" value="preview" disabled={busy}>Preview</button>
-          <button className="button-secondary" value="explain" disabled={busy}>Explain</button>
-          <button className="button-secondary" value="explain_analyze" disabled={busy}>Explain analyze</button>
+          {!batched && (
+            <>
+              <button className="button-secondary" value="explain" disabled={busy}>Explain</button>
+              <button className="button-secondary" value="explain_analyze" disabled={busy}>Explain analyze</button>
+            </>
+          )}
         </div>
       </form>
       {busy && <p role="status">Working…</p>}

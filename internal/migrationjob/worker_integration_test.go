@@ -138,7 +138,7 @@ func setupWorkerTest(t *testing.T) workerTest {
 			t.Fatal(err)
 		}
 	}
-	for _, filename := range []string{"0001_async_migration_evidence.sql", "0002_async_migration_batches.sql"} {
+	for _, filename := range []string{"0001_async_migration_evidence.sql", "0002_async_migration_batches.sql", "0003_async_batch_recovery.sql"} {
 		provision, err := os.ReadFile("../../migrations/target/" + filename)
 		if err != nil {
 			t.Fatal(err)

@@ -142,6 +142,9 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 		return w.deferStep(ctx, c, Reconciling, "target_identity_changed")
 	}
 
+	if migration.Operation(c.Operation).IsRecovery() {
+		return w.processRecovery(ctx, tx, c, a, targetID)
+	}
 	if c.Mode == Batch {
 		return w.processBatch(ctx, tx, c, a, targetID)
 	}
