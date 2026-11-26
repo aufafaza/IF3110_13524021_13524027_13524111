@@ -4,10 +4,10 @@ package platformdb_test
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"testing"
 	"testing/fstest"
-	"io/fs"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 

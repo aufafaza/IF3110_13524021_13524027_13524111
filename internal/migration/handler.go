@@ -40,9 +40,9 @@ func (h *Handler) handleListHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type migrationInput struct {
-	Title  				string `json:"title"`
-	SQL    				string `json:"sql"`
-	Action 				string `json:"action"`
+	Title              string  `json:"title"`
+	SQL                string  `json:"sql"`
+	Action             string  `json:"action"`
 	DownSQL            *string `json:"down_sql"`
 	IrreversibleReason *string `json:"irreversible_reason"`
 }

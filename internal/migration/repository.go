@@ -12,19 +12,19 @@ import (
 )
 
 type CreateDraftParams struct {
-	DatabaseID int64
-	Title      string
-	SQL        string
+	DatabaseID         int64
+	Title              string
+	SQL                string
 	DownSQL            *string
 	IrreversibleReason *string
-	CreatedBy  int64
+	CreatedBy          int64
 }
 
 type UpdateDraftParams struct {
-	ID         int64
-	DatabaseID int64
-	Title      string
-	SQL        string
+	ID                 int64
+	DatabaseID         int64
+	Title              string
+	SQL                string
 	DownSQL            *string
 	IrreversibleReason *string
 }
