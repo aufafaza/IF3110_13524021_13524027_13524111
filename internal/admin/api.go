@@ -19,6 +19,7 @@ func (h *Handler) RegisterAPIRoutes(mux *http.ServeMux, guard *access.Guard) {
 	mux.Handle("GET /api/groups", api(http.HandlerFunc(h.apiGroups)))
 	mux.Handle("POST /api/groups", api(http.HandlerFunc(h.apiGroups)))
 	mux.Handle("GET /api/groups/{id}", api(http.HandlerFunc(h.apiGroup)))
+	mux.Handle("POST /api/groups/{id}/leader", api(http.HandlerFunc(h.apiSetLeader)))
 	mux.Handle("DELETE /api/groups/{id}", api(http.HandlerFunc(h.apiDeleteGroup)))
 	mux.Handle("POST /api/users/{id}/active", api(http.HandlerFunc(h.apiUserActive)))
 	mux.Handle("POST /api/users/{id}/password", api(http.HandlerFunc(h.apiUserPassword)))
