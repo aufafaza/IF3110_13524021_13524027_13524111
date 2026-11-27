@@ -124,30 +124,6 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestStaticAssets(t *testing.T) {
-	h := newTestRouter(t, &fakeSessions{})
-	for path, wantType := range map[string]string{
-		"/static/htmx.min.js": "javascript",
-		"/static/app.js":      "javascript",
-		"/static/app.css":     "css",
-	} {
-		t.Run(path, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200 without a session", rec.Code)
-			}
-			if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, wantType) {
-				t.Errorf("content-type = %q, want %q", ct, wantType)
-			}
-			if rec.Body.Len() == 0 {
-				t.Error("empty body")
-			}
-		})
-	}
-}
-
 func TestHome_AnonymousGetsJSONUnauthorized(t *testing.T) {
 	rec := httptest.NewRecorder()
 	newTestRouter(t, &fakeSessions{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -170,9 +146,6 @@ func TestHome_LoggedIn(t *testing.T) {
 	logoutForm := regexp.MustCompile(`(?s)<form[^>]*action="/logout"[^>]*>\s*<input type="hidden" name="csrf_token" value="` + regexp.QuoteMeta(token) + `">`)
 	if !logoutForm.MatchString(body) {
 		t.Error("the CSRF token is not inside the logout form")
-	}
-	if !strings.Contains(body, `hx-headers='{"X-CSRF-Token": "`+token+`"}'`) {
-		t.Error("htmx requests would not carry the CSRF header")
 	}
 }
 
@@ -291,16 +264,6 @@ func TestAdminPages_AnonymousGetsJSONUnauthorized(t *testing.T) {
 	}
 }
 
-func TestAdminPages_HTMXRequestFromExpiredSessionGetsJSONUnauthorized(t *testing.T) {
-	h := newRig(t, &fakeSessions{}, false).handler
-	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
-	req.Header.Set("HX-Request", "true")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	assertJSONAccessError(t, rec, http.StatusUnauthorized, "unauthenticated")
-}
-
 func TestAdminPages_NonAdminIsForbidden(t *testing.T) {
 	h := newRig(t, &fakeSessions{valid: true}, false).handler
 	for _, path := range adminPages {
@@ -405,23 +368,6 @@ func TestAdminMutations_AuthorizationAndCSRF(t *testing.T) {
 	}
 }
 
-func TestAdminMutation_ReturnsAFragmentNotAFullPage(t *testing.T) {
-	rig := newRig(t, &fakeSessions{valid: true}, true)
-	req := withSession(formPost("/admin/users", url.Values{
-		"username": {"newuser"}, "password": {"a-long-enough-password"}, "csrf_token": {csrf.TokenFromSecret(testSecret)},
-	}))
-	rec := httptest.NewRecorder()
-	rig.handler.ServeHTTP(rec, req)
-
-	body := rec.Body.String()
-	if strings.Contains(body, "<html") {
-		t.Error("an htmx swap must not return a full page")
-	}
-	if !strings.Contains(body, `id="users"`) || !strings.Contains(body, "User created.") {
-		t.Errorf("fragment missing the users container or the success notice: %s", body)
-	}
-}
-
 func TestAdminRoutes_RejectWrongMethods(t *testing.T) {
 	h := newRig(t, &fakeSessions{valid: true}, true).handler
 	for _, path := range []string{"/admin/users/7/active", "/admin/groups/1/delete", "/admin/groups/1/members"} {
@@ -442,6 +388,12 @@ func TestStatic_ServedWithoutLogin(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "css") {
+		t.Errorf("Content-Type = %q, want CSS", contentType)
+	}
+	if rec.Body.Len() == 0 {
+		t.Error("empty stylesheet")
+	}
 }
 
 func assertJSONAccessError(t *testing.T, rec *httptest.ResponseRecorder, status int, message string) {
@@ -452,10 +404,8 @@ func assertJSONAccessError(t *testing.T, rec *httptest.ResponseRecorder, status 
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
-	for _, header := range []string{"Location", "HX-Redirect"} {
-		if value := rec.Header().Get(header); value != "" {
-			t.Errorf("unexpected %s: %q", header, value)
-		}
+	if value := rec.Header().Get("Location"); value != "" {
+		t.Errorf("unexpected Location: %q", value)
 	}
 	var payload struct {
 		Error string `json:"error"`

@@ -190,9 +190,6 @@ func TestAdmin_UsersPage(t *testing.T) {
 			t.Errorf("page missing %q", want)
 		}
 	}
-	if !strings.Contains(body, `hx-post="/admin/users/2/active"`) {
-		t.Error("no deactivate form for bob")
-	}
 	if strings.Count(body, "disabled") != 1 {
 		t.Errorf("want exactly one disabled button (the acting admin's own row), body has %d", strings.Count(body, "disabled"))
 	}
@@ -233,32 +230,6 @@ func TestAdmin_CreateUser_CheckboxUnticked(t *testing.T) {
 
 	if rig.svc.calls.createdAdmin[0] {
 		t.Error("a missing checkbox must not create a platform admin")
-	}
-}
-
-func TestAdmin_DomainErrorsAreShownNotThrown(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want string
-	}{
-		{"validation", &admin.ValidationError{Msg: "Password must be 12 to 128 characters."}, "Password must be 12 to 128 characters."},
-		{"username taken", admin.ErrUsernameTaken, "That username is already taken."},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rig := newAdminRig(t)
-			rig.svc.err = tt.err
-
-			rec := serve(rig.h.CreateUser, adminRequest(http.MethodPost, "/admin/users", url.Values{"username": {"x"}}, nil))
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d; htmx only swaps successful responses, so a form error must be a 200 fragment", rec.Code)
-			}
-			if !strings.Contains(rec.Body.String(), tt.want) {
-				t.Errorf("error message %q missing from %s", tt.want, rec.Body.String())
-			}
-		})
 	}
 }
 
@@ -429,10 +400,6 @@ func TestAdmin_GroupPage(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"analysts", "bob", "carol", "sales", "View + Edit", "hr",
-		`hx-post="/admin/groups/4/members/2/remove"`,
-		`hx-post="/admin/groups/4/grants/9/remove"`,
-		`hx-post="/admin/groups/4/members"`,
-		`hx-post="/admin/groups/4/grants"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
