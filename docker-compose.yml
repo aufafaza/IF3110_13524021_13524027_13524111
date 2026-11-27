@@ -26,9 +26,15 @@ services:
       SESSION_SECURE_COOKIES: "false"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      LOG_FILE: /var/log/migration-platform/app.jsonl
+    volumes:
+      - ./var/log/migration-platform:/var/log/migration-platform
     depends_on:
       database:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     command:
@@ -55,5 +61,69 @@ services:
     ports:
       - "${FRONTEND_PORT:-5173}:80"
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.142.0
+    # The backend creates app.jsonl with owner-only read permissions.
+    # This local demo container needs read access to the shared bind mount.
+    user: "0:0"
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ./var/log/migration-platform:/var/log/migration-platform:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - tempo
+      - loki
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+
+  loki:
+    image: grafana/loki:3.5.1
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes:
+      - ./observability/prometheus.full.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.0.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
 volumes:
   platform-db:
+  grafana-data:
+  loki-data:
+  prometheus-data:
+  tempo-data:
