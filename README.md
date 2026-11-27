@@ -64,12 +64,12 @@ The default stages ramp to 20 VUs for two minutes, then ramp down to observe
 recovery. Override `K6_RAMP_UP`, `K6_HOLD`, and `K6_RAMP_DOWN` for the team's
 normal load and step levels. Thresholds are applied to HTTP error rate, API p95,
 enqueue p95, and migration job failure rate. Enqueue response success is not
-counted as migration success; only the terminal job state is counted.
+counted as migration success, only the terminal job state is counted.
 
 The script writes `k6/results/summary.json`. The following results were
 collected on 2026-11-27 against two isolated PostgreSQL targets. API latency
-is reported separately for the concurrent table read and enqueue request;
-throughput is total HTTP requests per second. Each run used fresh approved
+is reported separately for the concurrent table read and enqueue request.
+Throughput is total HTTP requests per second. Each run used fresh approved
 reviews, and a terminal job state—not an accepted enqueue response—was counted
 as migration success.
 
@@ -84,9 +84,7 @@ Analysis: the peak level increased total request throughput to 28.38 req/s
 and raised queue wait and job duration p95 to 17.17 s and 17.42 s. API p95
 remained below the configured 1,000 ms read and 2,000 ms enqueue thresholds,
 while HTTP and terminal migration failure rates stayed at 0%. The recovery
-phase was observed as the ramp-down portion of each scenario; k6's aggregate
-summary does not expose phase-only percentiles, so those cells are not
-invented.
+phase was observed as the ramp-down portion of each scenario.
 
 The saved raw summaries are `k6/results/baseline-summary.json`,
 `k6/results/ramp-summary.json`, and `k6/results/peak-summary.json`.
