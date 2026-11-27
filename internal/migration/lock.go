@@ -14,6 +14,11 @@ import (
 
 const migrationLockNamespace int32 = 727002
 
+const (
+	minAdvisoryLockKey int64 = -2147483648
+	maxAdvisoryLockKey int64 = 2147483647
+)
+
 type Locker interface {
 	Acquire(ctx context.Context, databaseID int64) (release func() error, err error)
 }
@@ -84,13 +89,18 @@ func (l *PoolPostgresLocker) Acquire(ctx context.Context, databaseID int64) (fun
 }
 
 func acquireAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, databaseID int64, unlockLocal func()) (func() error, error) {
+	lockKey, err := advisoryLockKey(databaseID)
+	if err != nil {
+		unlockLocal()
+		return nil, err
+	}
+
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		unlockLocal()
 		return nil, fmt.Errorf("migration: acquire lock connection: %w", err)
 	}
 
-	lockKey := int32(databaseID)
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1, $2)", migrationLockNamespace, lockKey); err != nil {
 		conn.Release()
 		unlockLocal()
@@ -113,8 +123,20 @@ func acquireAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, databaseID int
 }
 
 func TryTargetTransactionLock(ctx context.Context, tx pgx.Tx, databaseID int64) (bool, error) {
+	lockKey, err := advisoryLockKey(databaseID)
+	if err != nil {
+		return false, err
+	}
+
 	var locked bool
-	err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)",
-		migrationLockNamespace, int32(databaseID)).Scan(&locked)
+	err = tx.QueryRow(ctx, "SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)",
+		migrationLockNamespace, lockKey).Scan(&locked)
 	return locked, err
+}
+
+func advisoryLockKey(databaseID int64) (int32, error) {
+	if databaseID < minAdvisoryLockKey || databaseID > maxAdvisoryLockKey {
+		return 0, fmt.Errorf("migration: database ID %d is outside the advisory-lock key range", databaseID)
+	}
+	return int32(databaseID), nil
 }
