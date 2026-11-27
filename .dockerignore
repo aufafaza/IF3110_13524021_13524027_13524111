@@ -1,0 +1,9 @@
+.git
+.github
+.gitignore
+var
+k6/results
+frontend/node_modules
+frontend/dist
+bin
+*.exe

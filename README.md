@@ -1,5 +1,41 @@
 # Migration Platform
 
+## Run locally
+
+The project includes a Docker Compose setup for PostgreSQL, the Go backend, and
+the React frontend. From the project root, run:
+
+```powershell
+docker compose up --build
+```
+
+Open <http://localhost:5173>. The default administrator is `admin` with the
+password `change-me`. Override it before starting the stack in PowerShell:
+
+```powershell
+$env:ADMIN_USERNAME = "admin"
+$env:ADMIN_PASSWORD = "your-password"
+docker compose up --build
+```
+
+The backend is also exposed at <http://localhost:8080>. The default Docker
+database credentials are `platform` / `platform`.
+### Run tests
+
+Unit tests:
+
+```powershell
+go test ./...
+```
+
+Integration tests:
+
+```powershell
+docker compose -f docker-compose.test.yml up -d --wait
+$env:TEST_DATABASE_URL = "postgres://test:test@localhost:5433/platform_test?sslmode=disable"
+go test -p 1 -race -tags=integration ./...
+```
+
 ## Observability
 
 The application exposes Prometheus metrics at `GET /metrics` and exports traces
