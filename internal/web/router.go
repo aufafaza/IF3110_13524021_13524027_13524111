@@ -32,6 +32,9 @@ func New(d Deps) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", health)
+	// Metrics are outside user-session authentication so Prometheus can scrape
+	// them using network policy or a service-level credential.
+	mux.Handle("GET /metrics", observability.MetricsHandler())
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static.FS)))
 
 	d.Auth.RegisterRoutes(mux)

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 )
 
 type Store struct {
@@ -20,6 +21,28 @@ type Store struct {
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
+}
+
+func (s *Store) SyncMetrics(ctx context.Context) error {
+	rows, err := s.pool.Query(ctx, `SELECT state, operation, mode, count(*)
+		FROM migration_async_jobs GROUP BY state, operation, mode`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var states []observability.JobState
+	for rows.Next() {
+		var state observability.JobState
+		if err := rows.Scan(&state.State, &state.Operation, &state.Mode, &state.Count); err != nil {
+			return err
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	observability.SetJobStates(states)
+	return nil
 }
 
 const jobColumns = `id, execution_id::text, database_id, migration_id, revision, operation, target_execution_id,
@@ -273,6 +296,9 @@ func releaseClaim(ctx context.Context, db interface {
 	}
 	if tag.RowsAffected() != 1 {
 		return errClaimLost
+	}
+	if state == Retrying {
+		observability.ObserveRetry(c.Operation, c.Mode)
 	}
 	return nil
 }

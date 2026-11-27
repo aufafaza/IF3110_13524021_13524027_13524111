@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -48,6 +49,7 @@ func WithActor(ctx context.Context, actor int64) context.Context {
 
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
 		ctx := traceContext.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		ctx = WithCorrelation(ctx, "")
 		ctx, span := Start(ctx, "http.request", trace.WithSpanKind(trace.SpanKindServer),
@@ -73,6 +75,7 @@ func Middleware(next http.Handler) http.Handler {
 		}
 		Log(ctx, slog.LevelInfo, "http.result", "method", r.Method, "status", status.code,
 			"status_class", fmt.Sprintf("%dxx", status.code/100))
+		ObserveHTTP(r.Method, RouteGroup(r.URL.Path), status.code, time.Since(started))
 		span.End(nil)
 	})
 }

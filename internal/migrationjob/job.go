@@ -171,3 +171,7 @@ func (d *Dispatcher) DispatchPending(ctx context.Context) error {
 	}
 	return dispatchErr
 }
+
+func (d *Dispatcher) SyncMetrics(ctx context.Context) error {
+	return d.store.SyncMetrics(ctx)
+}

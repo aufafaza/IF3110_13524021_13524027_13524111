@@ -72,6 +72,7 @@ func (w *Worker) Step(ctx context.Context) (_ bool, retErr error) {
 	if err != nil {
 		return false, err
 	}
+	observability.ObserveQueueWait(c.Operation, c.Mode, time.Since(c.CreatedAt))
 	ctx = observability.WithFields(approvalContext(ctx, c.approval),
 		attribute.Int64("job_id", c.ID), attribute.String("execution_id", c.ExecutionID))
 	ctx, span := observability.Start(ctx, "migration.worker", trace.WithSpanKind(trace.SpanKindConsumer), trace.WithTimestamp(claimedAt))
@@ -108,6 +109,11 @@ func (w *Worker) report(ctx context.Context, c claim, a attempt) (retErr error) 
 		status = "failed"
 		observability.Failure(ctx, a.failureCode)
 	}
+	result := "success"
+	if a.failureCode != "" {
+		result = "failure"
+	}
+	observability.ObserveMigration(c.Operation, c.Mode, result, a.finishedAt.Sub(a.startedAt))
 	observability.Log(ctx, slog.LevelInfo, "migration.attempt.result", "status", status, "failure_code", a.failureCode)
 	outcome := Outcome{
 		Approval: c.approval, JobID: c.ID, ExecutionID: c.ExecutionID, AttemptID: a.id,
@@ -150,7 +156,9 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 	}()
 
 	lockCtx, lockSpan := observability.Start(ctx, "migration.lock")
+	lockStarted := time.Now()
 	locked, err := migration.TryTargetTransactionLock(lockCtx, tx, c.DatabaseID)
+	observability.ObserveLockWait(c.Operation, c.Mode, time.Since(lockStarted))
 	observability.Log(lockCtx, slog.LevelInfo, "migration.lock.result", "acquired", locked)
 	lockSpan.End(err)
 	if err != nil {

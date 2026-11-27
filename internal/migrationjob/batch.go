@@ -143,7 +143,7 @@ func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a att
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
 	p := batchProgress{scope: tag.RowsAffected()}
-	return w.commitBatch(ctx, tx, c, a, p, false)
+	return w.commitBatch(ctx, tx, c, a, p, false, 0)
 }
 
 func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) (retErr error) {
@@ -199,7 +199,7 @@ func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attem
 		root, p.batches, *p.lastKey, affected); err != nil {
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
-	return w.commitBatch(ctx, tx, c, a, p, true)
+	return w.commitBatch(ctx, tx, c, a, p, true, affected)
 }
 
 var errBatchKeysMismatch = errors.New("batch UPDATE did not return the expected keys")
@@ -233,16 +233,16 @@ func applyBatchUpdate(ctx context.Context, tx pgx.Tx, sql string, keys []int64) 
 	return nil
 }
 
-func (w *Worker) commitBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, applied bool) error {
+func (w *Worker) commitBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, applied bool, affectedRows int64) error {
 	if _, err := tx.Exec(ctx, `UPDATE migration_worker.batch_runs
 		SET scope_rows = $2, committed_batches = $3, committed_rows = $4, last_key = $5
 		WHERE execution_id = $1::uuid`, c.batchRoot(), p.scope, p.batches, p.rows, p.lastKey); err != nil {
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
-	return w.commitBatchStep(ctx, tx, c, a, p, p.rows == p.scope, applied)
+	return w.commitBatchStep(ctx, tx, c, a, p, p.rows == p.scope, applied, affectedRows)
 }
 
-func (w *Worker) commitBatchStep(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, complete, applied bool) error {
+func (w *Worker) commitBatchStep(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, complete, applied bool, affectedRows int64) error {
 	var completedAt time.Time
 	if complete {
 		err := tx.QueryRow(ctx, `INSERT INTO migration_worker.completions (execution_id, attempt_id, plan_hash)
@@ -259,6 +259,9 @@ func (w *Worker) commitBatchStep(ctx context.Context, tx pgx.Tx, c claim, a atte
 	}
 	if applied && w.afterCommit != nil {
 		w.afterCommit()
+	}
+	if applied {
+		observability.ObserveBatch(c.Operation, c.Mode, affectedRows)
 	}
 	if !completedAt.IsZero() {
 		if err := w.store.projectBatch(ctx, c, p, false); err != nil {

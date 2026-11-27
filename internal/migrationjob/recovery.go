@@ -301,5 +301,5 @@ func (w *Worker) compensatePage(ctx context.Context, tx pgx.Tx, c claim, a attem
 	}
 	p.compensatedBatches++
 	p.compensatedRows += expected
-	return w.commitBatchStep(ctx, tx, c, a, p, p.compensatedBatches == p.batches, true)
+	return w.commitBatchStep(ctx, tx, c, a, p, p.compensatedBatches == p.batches, true, expected)
 }
