@@ -1,5 +1,11 @@
 # Migration Platform
 
+## Security SAST
+
+CodeQL SAST dijalankan otomatis pada Go backend dan TypeScript/React frontend.
+Konfigurasi workflow, cakupan analisis, bukti SARIF, dan register temuan ada di
+[`CODEQL.md`](CODEQL.md).
+
 ## Run locally
 
 The project includes a Docker Compose setup for PostgreSQL, the Go backend, and
