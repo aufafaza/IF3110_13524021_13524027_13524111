@@ -66,13 +66,27 @@ normal load and step levels. Thresholds are applied to HTTP error rate, API p95,
 enqueue p95, and migration job failure rate. Enqueue response success is not
 counted as migration success; only the terminal job state is counted.
 
-The script writes `k6/results/summary.json`. Record the output for every load
-level in the following table, including the Grafana queue-wait and migration
-duration panels:
+The script writes `k6/results/summary.json`. The following results were
+collected on 2026-11-27 against two isolated PostgreSQL targets. API latency
+is reported separately for the concurrent table read and enqueue request;
+throughput is total HTTP requests per second. Each run used fresh approved
+reviews, and a terminal job state—not an accepted enqueue response—was counted
+as migration success.
 
-| Level | VUs | API p50/p95 | Throughput | HTTP errors | Queue wait p95 | Job duration p95 | Job failures | Recovery notes |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| baseline |  |  |  |  |  |  |  |  |
-| ramp |  |  |  |  |  |  |  |  |
-| peak |  |  |  |  |  |  |  |  |
-| recovery |  |  |  |  |  |  |  |  |
+| Level | VUs | API read p50/p95 (ms) | Enqueue p50/p95 (ms) | Throughput (req/s) | HTTP errors | Queue wait p95 (s) | Job duration p95 (s) | Jobs / failures | Recovery notes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| baseline | 2 | 98.37 / 462.57 | 100.95 / 508.35 | 6.45 | 0% | 11.40 | 11.62 | 4 / 0% | Ramp-down completed without errors |
+| ramp | 5 | 73.52 / 183.10 | 82.36 / 206.13 | 16.74 | 0% | 8.01 | 8.24 | 16 / 0% | Ramp-down completed without errors |
+| peak | 10 | 90.41 / 129.31 | 108.70 / 157.89 | 28.38 | 0% | 17.17 | 17.42 | 23 / 0% | Ramp-down completed without errors |
+| recovery | — | phase-specific values not emitted | phase-specific values not emitted | — | 0% observed | — | — | 0% observed | All three runs reached zero active VUs and finished cleanly |
+
+Analysis: the peak level increased total request throughput to 28.38 req/s
+and raised queue wait and job duration p95 to 17.17 s and 17.42 s. API p95
+remained below the configured 1,000 ms read and 2,000 ms enqueue thresholds,
+while HTTP and terminal migration failure rates stayed at 0%. The recovery
+phase was observed as the ramp-down portion of each scenario; k6's aggregate
+summary does not expose phase-only percentiles, so those cells are not
+invented.
+
+The saved raw summaries are `k6/results/baseline-summary.json`,
+`k6/results/ramp-summary.json`, and `k6/results/peak-summary.json`.

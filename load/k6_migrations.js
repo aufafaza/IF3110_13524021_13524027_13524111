@@ -43,21 +43,29 @@ export const options = {
 }
 
 let csrfToken = ''
+let cookieJar
+
+function getCookieJar() {
+  if (!cookieJar) cookieJar = http.cookieJar()
+  return cookieJar
+}
 
 function authenticate() {
-  const session = http.get(`${baseURL}/api/auth/session`, { tags: { operation: 'login_session' } })
+  const jar = getCookieJar()
+  const session = http.get(`${baseURL}/api/auth/session`, { jar, tags: { operation: 'login_session' } })
   apiLatency.add(session.timings.duration, { operation: 'login_session' })
   if (!check(session, { 'login session is 200': (response) => response.status === 200 })) return false
 
   const token = session.json('csrf_token')
   const login = http.post(`${baseURL}/api/auth/login`, JSON.stringify({ username, password }), {
+    jar,
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
     tags: { operation: 'login' },
   })
   apiLatency.add(login.timings.duration, { operation: 'login' })
   if (!check(login, { 'login is successful': (response) => response.status === 200 })) return false
 
-  const authenticated = http.get(`${baseURL}/api/auth/session`, { tags: { operation: 'login_session' } })
+  const authenticated = http.get(`${baseURL}/api/auth/session`, { jar, tags: { operation: 'login_session' } })
   apiLatency.add(authenticated.timings.duration, { operation: 'login_session' })
   if (!check(authenticated, { 'authenticated session is 200': (response) => response.status === 200 })) return false
   csrfToken = authenticated.json('csrf_token')
@@ -65,12 +73,14 @@ function authenticate() {
 }
 
 function pollJob(databaseID, jobID) {
+  const jar = getCookieJar()
   const started = Date.now()
   let sawRunning = false
   let lastState = 'queued'
   let job
   while (Date.now() - started < pollTimeout * 1000) {
     const response = http.get(`${baseURL}/api/databases/${databaseID}/jobs/${jobID}`, {
+      jar,
       tags: { operation: 'job_status' },
     })
     apiLatency.add(response.timings.duration, { operation: 'job_status' })
@@ -107,12 +117,16 @@ export function setup() {
 export default function (data) {
   if (!csrfToken && !authenticate()) return
 
-  const index = (__VU - 1) % data.reviewIDs.length
+  const jar = getCookieJar()
+  // Advance through approved reviews across iterations so an iteration never
+  // silently re-enqueues the same already-completed job.
+  const index = ((__ITER * maxVUs) + (__VU - 1)) % data.reviewIDs.length
   const databaseID = data.databaseIDs[index % data.databaseIDs.length]
   const reviewID = data.reviewIDs[index]
   const responses = http.batch([
-    ['GET', `${baseURL}/api/databases/${databaseID}/tables`, null, { tags: { operation: 'api_read' } }],
+    ['GET', `${baseURL}/api/databases/${databaseID}/tables`, null, { jar, tags: { operation: 'api_read' } }],
     ['POST', `${baseURL}/api/migration-reviews/${reviewID}/enqueue`, null, {
+      jar,
       headers: { 'X-CSRF-Token': csrfToken },
       tags: { operation: 'enqueue_job' },
     }],
