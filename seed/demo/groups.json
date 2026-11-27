@@ -1,0 +1,12 @@
+[
+  {
+    "name": "engineering",
+    "leader_username": "demo_leader",
+    "members": ["demo_editor", "demo_leader"]
+  },
+  {
+    "name": "audit",
+    "leader_username": "demo_auditor",
+    "members": ["demo_auditor"]
+  }
+]

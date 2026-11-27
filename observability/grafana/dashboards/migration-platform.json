@@ -59,6 +59,25 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "targets": [{"expr": "rate(migration_platform_db_pool_acquire_wait_seconds[5m])", "legendFormat": "{{pool}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "API response time p50 / p95",
+      "id": 7,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(migration_platform_http_request_duration_seconds_bucket{route=\"api\"}[5m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(migration_platform_http_request_duration_seconds_bucket{route=\"api\"}[5m])))", "legendFormat": "p95", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "k6 API latency p95",
+      "id": 8,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [{"expr": "1000 * k6_api_latency_ms_p99{operation=~\"api_read|enqueue_job|job_status\"}", "legendFormat": "{{operation}} p99", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []}
     }
   ],
   "refresh": "5s",
