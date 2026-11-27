@@ -1,0 +1,13 @@
+{
+  "name": "Demo PostgreSQL",
+  "host": "database",
+  "port": 5432,
+  "db_name": "demo_target",
+  "db_user": "platform",
+  "password": "platform",
+  "sslmode": "disable",
+  "grants": {
+    "engineering": "edit",
+    "audit": "view"
+  }
+}

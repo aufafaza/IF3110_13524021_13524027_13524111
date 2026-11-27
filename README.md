@@ -37,6 +37,52 @@ The demo Compose file connects the backend to the OpenTelemetry Collector at
 scrape the backend at `backend:8080/metrics`. Grafana is provisioned with the
 Prometheus, Loki, and Tempo data sources and the migration dashboard.
 
+### Seed demo data
+
+After the full stack is running, run the seed command from a second PowerShell
+window:
+
+```powershell
+docker compose exec backend /app/seed-demo
+```
+
+The seed is idempotent and loads the JSON fixtures in
+[`seed/demo`](seed/demo):
+
+- a separate `demo_target` PostgreSQL database;
+- three customers in `demo_customers`;
+- the `Demo PostgreSQL` managed database connection;
+- `engineering` (edit) and `audit` (view) groups;
+- a draft migration that adds a `notes` column to `demo_customers`.
+
+Demo accounts:
+
+| Username | Password | Role |
+| --- | --- | --- |
+| `demo_editor` | `demo-editor` | Engineering editor; submits migrations |
+| `demo_leader` | `demo-leader` | Engineering group leader; approves |
+| `demo_auditor` | `demo-auditor` | Audit group leader; approves |
+
+The seed command is intended for local demonstrations only. The passwords and
+database credentials in the JSON fixtures must not be used in production.
+
+### Populate batch observability panels
+
+To create visible migration-duration, rows-processed, and batches-processed
+data, run this after seeding:
+
+```powershell
+.\scripts\run-batch-observability-demo.ps1
+```
+
+The helper adds 250 demo rows, creates a 25-row batch migration, submits both
+required approvals, enqueues the job, and waits for it to succeed. Open the
+Grafana dashboard immediately afterward; the rate panels show the activity for
+several minutes:
+<http://localhost:3000/d/migration-platform/migration-platform-observability>.
+Use `-ExtraRows` and `-BatchSize` to change the workload, for example
+`.\scripts\run-batch-observability-demo.ps1 -ExtraRows 1000 -BatchSize 50`.
+
 ### Run tests
 
 Unit tests:
@@ -87,18 +133,30 @@ virtual user polls the resulting job until it reaches a terminal state. Set
 `K6_DATABASE_IDS` and `K6_REVIEW_IDS` in matching order to exercise the same
 database or distribute traffic across different databases.
 
-Example:
+The repository does not require k6 to be installed on the host. Run it in the
+official Docker image and send its metrics to the Prometheus remote-write
+receiver:
 
 ```powershell
-k6 run `
-  -e BASE_URL=http://127.0.0.1:8080 `
-  -e K6_USERNAME=loadtest `
-  -e K6_PASSWORD='change-me' `
-  -e K6_DATABASE_IDS=1,2 `
-  -e K6_REVIEW_IDS=approved-review-id-1,approved-review-id-2 `
+New-Item -ItemType Directory -Force .\k6\results | Out-Null
+docker run --rm -i `
+  -v "${PWD}:/work" `
+  -w /work `
+  grafana/k6:latest run `
+  -o experimental-prometheus-rw `
+  -e K6_PROMETHEUS_RW_SERVER_URL=http://host.docker.internal:9090/api/v1/write `
+  -e BASE_URL=http://host.docker.internal:8080 `
+  -e K6_USERNAME=demo_editor `
+  -e K6_PASSWORD=demo-editor `
+  -e K6_DATABASE_IDS=2 `
+  -e K6_REVIEW_IDS=approved-review-id `
   -e K6_MAX_VUS=20 `
   load/k6_migrations.js
 ```
+
+Replace `approved-review-id` with the ID returned after creating and approving
+a migration review. `docker-compose.yml` enables Prometheus's remote-write
+receiver, so k6 metrics appear in the provisioned Grafana dashboard.
 
 The default stages ramp to 20 VUs for two minutes, then ramp down to observe
 recovery. Override `K6_RAMP_UP`, `K6_HOLD`, and `K6_RAMP_DOWN` for the team's
