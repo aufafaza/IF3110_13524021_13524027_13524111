@@ -1,16 +1,18 @@
 # Migration Platform
 
-## Run locally
+## Run the full demo
 
-The project includes a Docker Compose setup for PostgreSQL, the Go backend, and
-the React frontend. From the project root, run:
+The full Docker Compose stack includes PostgreSQL, the Go backend, the React
+frontend, Grafana, Prometheus, Loki, Tempo, and the OpenTelemetry Collector.
+From the project root, run:
 
 ```powershell
+New-Item -ItemType Directory -Force var/log/migration-platform | Out-Null
 docker compose up --build
 ```
 
 Open <http://localhost:5173>. The default administrator is `admin` with the
-password `change-me`. Override it before starting the stack in PowerShell:
+password `change-me`. Override it before starting the stack if needed:
 
 ```powershell
 $env:ADMIN_USERNAME = "admin"
@@ -18,8 +20,23 @@ $env:ADMIN_PASSWORD = "your-password"
 docker compose up --build
 ```
 
-The backend is also exposed at <http://localhost:8080>. The default Docker
-database credentials are `platform` / `platform`.
+Service URLs:
+
+- Application: <http://localhost:5173>
+- Backend: <http://localhost:8080>
+- Grafana: <http://localhost:3000> (`admin` / `admin`)
+- Prometheus: <http://localhost:9090>
+- Tempo: <http://localhost:3200>
+- Loki: <http://localhost:3100>
+
+The default Docker database credentials are `platform` / `platform`.
+
+The demo Compose file connects the backend to the OpenTelemetry Collector at
+`otel-collector:4317`, writes JSON logs to the shared
+`var/log/migration-platform` directory for Loki, and configures Prometheus to
+scrape the backend at `backend:8080/metrics`. Grafana is provisioned with the
+Prometheus, Loki, and Tempo data sources and the migration dashboard.
+
 ### Run tests
 
 Unit tests:
@@ -39,25 +56,12 @@ go test -p 1 -race -tags=integration ./...
 ## Observability
 
 The application exposes Prometheus metrics at `GET /metrics` and exports traces
-to an OpenTelemetry Collector when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. JSON
-logs include `trace_id`, `span_id`, and `correlation_id`. Set `LOG_FILE` to a
-JSONL path so the Collector's `filelog` receiver can forward those logs to Loki.
-
-Start the reproducible local observability stack:
-
-```powershell
-New-Item -ItemType Directory -Force var/log/migration-platform | Out-Null
-docker compose -f docker-compose.observability.yml up -d
-$env:OTEL_EXPORTER_OTLP_ENDPOINT = "127.0.0.1:4317"
-$env:LOG_FILE = "var/log/migration-platform/app.jsonl"
-$env:SESSION_SECURE_COOKIES = "false"
-go run ./cmd/server
-```
-
-Open Grafana at <http://127.0.0.1:3000> with `admin` / `admin`. The provisioned
-dashboard covers job state, queue wait, lock wait, migration duration, batch and
-row throughput, active/idle pool connections, and pool acquire wait. Prometheus
-scrapes the host application at `host.docker.internal:8080`.
+to the OpenTelemetry Collector. JSON logs include `trace_id`, `span_id`, and
+`correlation_id`. The full demo stack configures these connections
+automatically. Open Grafana at <http://127.0.0.1:3000> with `admin` / `admin`.
+The provisioned dashboard covers job state, queue wait, lock wait, migration
+duration, batch and row throughput, active/idle pool connections, and pool
+acquire wait.
 
 Metric labels are intentionally bounded: route group, HTTP method, status class,
 operation, mode, result, pool role, pool state, and job state. User IDs, job IDs,
