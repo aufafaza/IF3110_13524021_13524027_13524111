@@ -30,19 +30,19 @@ export function AdminUsersPage() {
       {request.status !== 'ready' ? <RequestFeedback request={request} loading="Loading users…" /> :
         <ul className="resource-list" role="list">
           {request.data.users.map((user) => (
-            <li className="resource-row" key={user.ID}>
-              <strong>{user.Username}</strong>
-              <p>{user.IsActive ? 'Active' : 'Inactive'} · {user.IsPlatformAdmin ? 'Administrator' : 'Member'}</p>
+            <li className="resource-row" key={user.id}>
+              <strong>{user.username}</strong>
+              <p>{user.is_active ? 'Active' : 'Inactive'} · {user.is_platform_admin ? 'Administrator' : 'Member'}</p>
               <div className="action-row">
-                <button type="button" className="button-secondary" disabled={action.busy || user.ID === userID}
-                  onClick={() => void action.run(`/api/users/${user.ID}/active`, { active: !user.IsActive })}>
-                  {user.IsActive ? 'Deactivate' : 'Activate'}
+                <button type="button" className="button-secondary" disabled={action.busy || user.id === userID}
+                  onClick={() => void action.run(`/api/users/${user.id}/active`, { active: !user.is_active })}>
+                  {user.is_active ? 'Deactivate' : 'Activate'}
                 </button>
                 <details>
                   <summary>Reset password</summary>
                   <form className="editor-form" onSubmit={(event) => {
                     const form = readForm(event)
-                    void action.run(`/api/users/${user.ID}/password`, { password: form.password }, {
+                    void action.run(`/api/users/${user.id}/password`, { password: form.password }, {
                       message: 'Password reset.',
                     })
                   }}>

@@ -1,8 +1,8 @@
 import { apiFetch } from '@/api/client'
 
-type User = { ID: number; Username: string; IsActive: boolean; IsPlatformAdmin: boolean }
-type Group = { ID: number; Name: string; MemberCount: number }
-type Grant = { DatabaseID: number; DatabaseName: string; Level: number }
+type User = { id: number; username: string; is_active: boolean; is_platform_admin: boolean }
+type Group = { id: number; name: string; member_count: number }
+type Grant = { database_id: number; database_name: string; level: number }
 export type ManagedDatabase = {
   id: number
   name: string

@@ -24,7 +24,7 @@ export function AdminGroupsPage() {
         request.data.groups.length === 0 ? <p className="feedback">No groups available.</p> :
           <ul className="resource-list" role="list">
             {request.data.groups.map((group) => (
-              <li key={group.ID}><Link className="resource-link" to={`/admin/groups/${group.ID}`}>{group.Name}</Link></li>
+              <li key={group.id}><Link className="resource-link" to={`/admin/groups/${group.id}`}>{group.name}</Link></li>
             ))}
           </ul>}
     </>
@@ -50,13 +50,13 @@ function GroupEditor({ id }: { id: string }) {
       <AdminFeedback {...action} />
       {request.status !== 'ready' ? <RequestFeedback request={request} loading="Loading group…" /> : (
         <>
-          <h1>{request.data.group.Name}</h1>
+          <h1>{request.data.group.name}</h1>
           <h2>Members</h2>
           {(request.data.members ?? []).map((member) => (
-            <div className="action-row" key={member.ID}>
-              <span>{member.Username}</span>
+            <div className="action-row" key={member.id}>
+              <span>{member.username}</span>
               <button className="button-secondary" disabled={action.busy} onClick={() =>
-                void action.run(`${path}/members`, { user_id: member.ID, action: 'remove' })
+                void action.run(`${path}/members`, { user_id: member.id, action: 'remove' })
               }>Remove</button>
             </div>
           ))}
@@ -67,18 +67,18 @@ function GroupEditor({ id }: { id: string }) {
             }}>
               <label>User<select name="user_id" required defaultValue="">
                 <option value="">Select a user</option>
-                {users.data.users.filter((user) => !request.data.members?.some((member) => member.ID === user.ID))
-                  .map((user) => <option key={user.ID} value={user.ID}>{user.Username}</option>)}
+                {users.data.users.filter((user) => !request.data.members?.some((member) => member.id === user.id))
+                  .map((user) => <option key={user.id} value={user.id}>{user.username}</option>)}
               </select></label>
               <button disabled={action.busy}>Add member</button>
             </form>
           )}
           <h2>Database grants</h2>
           {(request.data.grants ?? []).map((grant) => (
-            <div className="action-row" key={grant.DatabaseID}>
-              <span>{grant.DatabaseName} · {grant.Level === 2 ? 'Edit' : 'View'}</span>
+            <div className="action-row" key={grant.database_id}>
+              <span>{grant.database_name} · {grant.level === 2 ? 'Edit' : 'View'}</span>
               <button className="button-secondary" disabled={action.busy} onClick={() =>
-                void action.run(`${path}/grants`, { database_id: grant.DatabaseID, action: 'remove' })
+                void action.run(`${path}/grants`, { database_id: grant.database_id, action: 'remove' })
               }>Remove grant</button>
             </div>
           ))}
