@@ -70,6 +70,9 @@ func (q *ReviewQueue) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for ctx.Err() == nil {
 		dispatchCtx, cancel := context.WithTimeout(ctx, stepTimeout)
+		if err := q.dispatcher.SyncMetrics(dispatchCtx); err != nil && ctx.Err() == nil {
+			slog.WarnContext(ctx, "migration metrics synchronization failed")
+		}
 		err := q.dispatcher.DispatchPending(dispatchCtx)
 		cancel()
 		if err != nil && ctx.Err() == nil {

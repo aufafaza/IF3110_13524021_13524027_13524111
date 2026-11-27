@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 )
 
 var (
@@ -204,6 +206,7 @@ func (r *Registry) evict(id int64) {
 	delete(r.pools, id)
 	r.mu.Unlock()
 	if ok {
+		observability.UnregisterPool(p)
 		go p.Close()
 	}
 }
@@ -212,6 +215,7 @@ func (r *Registry) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, p := range r.pools {
+		observability.UnregisterPool(p)
 		p.Close()
 		delete(r.pools, id)
 	}

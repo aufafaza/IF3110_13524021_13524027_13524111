@@ -9,12 +9,14 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -127,10 +129,23 @@ func (w stdLogWriter) Write(p []byte) (int, error) {
 }
 
 func ConfigureTracing() func(context.Context) error {
-	provider := sdktrace.NewTracerProvider(
+	processors := []sdktrace.SpanProcessor{sdktrace.NewSimpleSpanProcessor(spanLogger{})}
+	if endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+		exporter, err := otlptracegrpc.New(context.Background(),
+			otlptracegrpc.WithEndpoint(endpoint), otlptracegrpc.WithInsecure())
+		if err != nil {
+			slog.Error("otel exporter initialization failed", "error", safeError(err))
+		} else {
+			processors = append(processors, sdktrace.NewBatchSpanProcessor(exporter))
+		}
+	}
+	options := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", "migration-platform"))),
-		sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(spanLogger{})),
-	)
+	}
+	for _, processor := range processors {
+		options = append(options, sdktrace.WithSpanProcessor(processor))
+	}
+	provider := sdktrace.NewTracerProvider(options...)
 	otel.SetTracerProvider(provider)
 	return provider.Shutdown
 }

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -29,7 +31,21 @@ import (
 )
 
 func main() {
-	observability.ConfigureJSON(os.Stdout)
+	logOutput := io.Writer(os.Stdout)
+	var logFile *os.File
+	if path := os.Getenv("LOG_FILE"); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			log.Fatalf("log directory: %v", err)
+		}
+		var err error
+		logFile, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+		if err != nil {
+			log.Fatalf("log file: %v", err)
+		}
+		defer logFile.Close()
+		logOutput = io.MultiWriter(os.Stdout, logFile)
+	}
+	observability.ConfigureJSON(logOutput)
 	shutdownTracing := observability.ConfigureTracing()
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
