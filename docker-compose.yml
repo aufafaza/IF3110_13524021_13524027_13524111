@@ -97,7 +97,10 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.5.0
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
     volumes:
       - ./observability/prometheus.full.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
