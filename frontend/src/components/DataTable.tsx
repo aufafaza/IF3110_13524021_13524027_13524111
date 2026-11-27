@@ -17,7 +17,11 @@ export function DataTable({ caption, headings, rows }: {
         <tbody>
           {rows.map((row, index) => (
             <tr key={index}>
-              {row.map((cell, column) => <td key={column}>{cell}</td>)}
+              {row.map((cell, column) => (
+                <td key={column}>
+                  <div className="cell-clip" title={typeof cell === 'string' ? cell : undefined}>{cell}</div>
+                </td>
+              ))}
             </tr>
           ))}
         </tbody>
