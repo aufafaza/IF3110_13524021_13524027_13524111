@@ -1,11 +1,5 @@
 # Migration Platform
 
-## Security SAST
-
-CodeQL SAST dijalankan otomatis pada Go backend dan TypeScript/React frontend.
-Konfigurasi workflow, cakupan analisis, bukti SARIF, dan register temuan ada di
-[`CODEQL.md`](CODEQL.md).
-
 ## Run locally
 
 The project includes a Docker Compose setup for PostgreSQL, the Go backend, and
@@ -130,3 +124,10 @@ phase was observed as the ramp-down portion of each scenario.
 
 The saved raw summaries are `k6/results/baseline-summary.json`,
 `k6/results/ramp-summary.json`, and `k6/results/peak-summary.json`.
+
+## Security SAST
+
+CodeQL SAST runs automatically on both the Go backend and the TypeScript/React frontend.
+The workflow configuration, analysis scope, SARIF evidence, and findings register are documented in [`CODEQL.md`](CODEQL.md).
+The initial local scan identified 7 Go alerts and 0 JavaScript/TypeScript alerts. After fixing the integer conversion issue, the subsequent scan reported 6 Go alerts and 0 JavaScript/TypeScript alerts.
+Details of each rule, severity, code location, potential impact, and remediation decision are documented in [`CODEQL.md`](CODEQL.md), with supporting evidence available in the [`codeQLresults`](codeQLresults) directory.
