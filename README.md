@@ -1,5 +1,41 @@
 # Migration Platform
 
+## Run locally
+
+The project includes a Docker Compose setup for PostgreSQL, the Go backend, and
+the React frontend. From the project root, run:
+
+```powershell
+docker compose up --build
+```
+
+Open <http://localhost:5173>. The default administrator is `admin` with the
+password `change-me`. Override it before starting the stack in PowerShell:
+
+```powershell
+$env:ADMIN_USERNAME = "admin"
+$env:ADMIN_PASSWORD = "your-password"
+docker compose up --build
+```
+
+The backend is also exposed at <http://localhost:8080>. The default Docker
+database credentials are `platform` / `platform`.
+### Run tests
+
+Unit tests:
+
+```powershell
+go test ./...
+```
+
+Integration tests:
+
+```powershell
+docker compose -f docker-compose.test.yml up -d --wait
+$env:TEST_DATABASE_URL = "postgres://test:test@localhost:5433/platform_test?sslmode=disable"
+go test -p 1 -race -tags=integration ./...
+```
+
 ## Observability
 
 The application exposes Prometheus metrics at `GET /metrics` and exports traces
@@ -88,3 +124,10 @@ phase was observed as the ramp-down portion of each scenario.
 
 The saved raw summaries are `k6/results/baseline-summary.json`,
 `k6/results/ramp-summary.json`, and `k6/results/peak-summary.json`.
+
+## Security SAST
+
+CodeQL SAST runs automatically on both the Go backend and the TypeScript/React frontend.
+The workflow configuration, analysis scope, SARIF evidence, and findings register are documented in [`CODEQL.md`](CODEQL.md).
+The initial local scan identified 7 Go alerts and 0 JavaScript/TypeScript alerts. After fixing the integer conversion issue, the subsequent scan reported 6 Go alerts and 0 JavaScript/TypeScript alerts.
+Details of each rule, severity, code location, potential impact, and remediation decision are documented in [`CODEQL.md`](CODEQL.md), with supporting evidence available in the [`codeQLresults`](codeQLresults) directory.
