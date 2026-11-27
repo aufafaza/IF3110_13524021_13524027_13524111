@@ -12,6 +12,8 @@ import (
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type batchProgress struct {
@@ -122,7 +124,9 @@ func (w *Worker) batchAuthorizationFailure(ctx context.Context, c claim, err err
 	}
 }
 
-func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a attempt) error {
+func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a attempt) (retErr error) {
+	ctx, span := observability.Start(withAttempt(ctx, a.id, c.Attempts), "migration.batch.scope")
+	defer func() { span.End(retErr) }()
 	if err := w.store.markBatchPending(ctx, c); err != nil {
 		return err
 	}
@@ -142,7 +146,9 @@ func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a att
 	return w.commitBatch(ctx, tx, c, a, p, false)
 }
 
-func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) error {
+func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) (retErr error) {
+	ctx, span := observability.Start(observability.WithFields(withAttempt(ctx, a.id, c.Attempts), attribute.Int64("batch_sequence", p.batches+1)), "migration.batch.apply")
+	defer func() { span.End(retErr) }()
 	query := `SELECT key FROM migration_worker.batch_scope WHERE execution_id = $1::uuid ORDER BY key LIMIT $2`
 	root := c.batchRoot()
 	args := []any{root, a.batchPlan.Size}
@@ -292,6 +298,7 @@ func (w *Worker) rollbackBatch(ctx context.Context, tx pgx.Tx, c claim, cause er
 }
 
 func (w *Worker) batchFailure(ctx context.Context, c claim, code string, retryable bool) error {
+	observability.Failure(ctx, code)
 	if retryable && c.batchFailures+1 < c.attemptLimit {
 		return w.store.retryBatch(ctx, c, code)
 	}

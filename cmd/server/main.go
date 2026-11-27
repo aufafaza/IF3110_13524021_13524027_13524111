@@ -30,6 +30,12 @@ import (
 
 func main() {
 	observability.ConfigureJSON(os.Stdout)
+	shutdownTracing := observability.ConfigureTracing()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

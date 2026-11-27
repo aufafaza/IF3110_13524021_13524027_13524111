@@ -4,115 +4,114 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
-	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
-	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
-	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
-type contextKey struct{}
+type correlationKey struct{}
+type fieldsKey struct{}
 
-type identifiers struct {
-	correlationID string
-	traceID       string
-	spanID        string
+var correlationFormat = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var traceContext propagation.TraceContext
+
+type Propagation struct {
+	Traceparent   string
+	Tracestate    string
+	CorrelationID string
 }
 
-type Span struct {
-	ctx       context.Context
-	logger    *slog.Logger
-	name      string
-	startedAt time.Time
-	ids       identifiers
+func WithCorrelation(ctx context.Context, id string) context.Context {
+	if !correlationFormat.MatchString(id) {
+		var seed [16]byte
+		_, _ = rand.Read(seed[:])
+		id = hex.EncodeToString(seed[:])
+	}
+	return context.WithValue(ctx, correlationKey{}, id)
 }
 
-func newID(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return strings.Repeat("0", n*2)
-	}
-	return hex.EncodeToString(b)
+func CorrelationID(ctx context.Context) string {
+	id, _ := ctx.Value(correlationKey{}).(string)
+	return id
 }
 
-func WithIdentifiers(ctx context.Context, correlationID, traceID, spanID string) context.Context {
-	if correlationID == "" {
-		correlationID = newID(16)
+func Capture(ctx context.Context) Propagation {
+	carrier := propagation.MapCarrier{}
+	traceContext.Inject(ctx, carrier)
+	return Propagation{
+		Traceparent: carrier.Get("traceparent"), Tracestate: carrier.Get("tracestate"),
+		CorrelationID: CorrelationID(ctx),
 	}
-	if traceID == "" {
-		traceID = newID(16)
-	}
-	if spanID == "" {
-		spanID = newID(8)
-	}
-	return context.WithValue(ctx, contextKey{}, identifiers{correlationID, traceID, spanID})
 }
 
-func identifiersFromContext(ctx context.Context) identifiers {
-	ids, _ := ctx.Value(contextKey{}).(identifiers)
-	if ids.correlationID == "" {
-		ids.correlationID = newID(16)
+func Restore(ctx context.Context, saved Propagation) context.Context {
+	ctx = traceContext.Extract(ctx, propagation.MapCarrier{
+		"traceparent": saved.Traceparent, "tracestate": saved.Tracestate,
+	})
+	if saved.CorrelationID != "" || CorrelationID(ctx) == "" {
+		ctx = WithCorrelation(ctx, saved.CorrelationID)
 	}
-	if ids.traceID == "" {
-		ids.traceID = newID(16)
-	}
-	if ids.spanID == "" {
-		ids.spanID = newID(8)
-	}
-	return ids
+	return ctx
 }
 
-func CorrelationID(ctx context.Context) string { return identifiersFromContext(ctx).correlationID }
-func TraceID(ctx context.Context) string       { return identifiersFromContext(ctx).traceID }
-func SpanID(ctx context.Context) string        { return identifiersFromContext(ctx).spanID }
+func WithFields(ctx context.Context, fields ...attribute.KeyValue) context.Context {
+	existing, _ := ctx.Value(fieldsKey{}).([]attribute.KeyValue)
+	set := attribute.NewSet(append(append([]attribute.KeyValue(nil), existing...), fields...)...)
+	return context.WithValue(ctx, fieldsKey{}, set.ToSlice())
+}
 
-func Start(ctx context.Context, name string) (context.Context, *Span) {
-	ids := identifiersFromContext(ctx)
-	spanID := newID(8)
-	ctx = WithIdentifiers(ctx, ids.correlationID, ids.traceID, spanID)
-	return ctx, &Span{ctx: ctx, logger: slog.Default(), name: name, startedAt: time.Now(), ids: identifiers{ids.correlationID, ids.traceID, spanID}}
+type Span struct{ trace.Span }
+
+func Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, *Span) {
+	if CorrelationID(ctx) == "" {
+		ctx = WithCorrelation(ctx, "")
+	}
+	fields, _ := ctx.Value(fieldsKey{}).([]attribute.KeyValue)
+	opts = append(opts, trace.WithAttributes(append([]attribute.KeyValue{
+		attribute.String("correlation_id", CorrelationID(ctx)),
+	}, fields...)...))
+	ctx, span := otel.Tracer("migration-platform").Start(ctx, name, opts...)
+	return ctx, &Span{Span: span}
 }
 
 func (s *Span) End(err error) {
-	if s == nil {
-		return
-	}
-	attrs := []any{
-		"event", "span.end",
-		"span_name", s.name,
-		"duration_ms", float64(time.Since(s.startedAt).Microseconds()) / 1000,
-		"correlation_id", s.ids.correlationID,
-		"trace_id", s.ids.traceID,
-		"span_id", s.ids.spanID,
-	}
 	if err != nil {
-		attrs = append(attrs, "status", "error", "error", err.Error())
-	} else {
-		attrs = append(attrs, "status", "ok")
+		message := safeError(err)
+		s.RecordError(errors.New(message))
+		s.SetStatus(codes.Error, message)
 	}
-	s.logger.InfoContext(s.ctx, "span", attrs...)
+	s.Span.End()
+}
+
+func Failure(ctx context.Context, code string) {
+	trace.SpanFromContext(ctx).SetStatus(codes.Error, code)
 }
 
 func Log(ctx context.Context, level slog.Level, event string, attrs ...any) {
-	ids := identifiersFromContext(ctx)
-	attrs = append(attrs,
-		"event", event,
-		"correlation_id", ids.correlationID,
-		"trace_id", ids.traceID,
-		"span_id", ids.spanID,
-	)
+	fields, _ := ctx.Value(fieldsKey{}).([]attribute.KeyValue)
+	for _, field := range fields {
+		attrs = append(attrs, string(field.Key), field.Value.AsInterface())
+	}
+	span := trace.SpanContextFromContext(ctx)
+	attrs = append(attrs, "event", event, "correlation_id", CorrelationID(ctx))
+	if span.IsValid() {
+		attrs = append(attrs, "trace_id", span.TraceID().String(), "span_id", span.SpanID().String())
+	}
 	slog.Default().Log(ctx, level, event, attrs...)
 }
 
-// ConfigureJSON installs one JSON logger for both slog and the legacy log
-// calls that still exist in the M1 handlers. This keeps application output
-// machine-readable without moving credentials or session data to PostgreSQL.
 func ConfigureJSON(w io.Writer) {
 	logger := slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -127,149 +126,60 @@ func (w stdLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-type queryStart struct {
-	started time.Time
-	sql     string
-	args    []any
-}
-type queryStartKey struct{}
-type batchStartKey struct{}
-
-// NewPGXTracer instruments Query, QueryRow, Exec and batch statements for
-// both the platform pool and managed-database pools.
-func NewPGXTracer() pgx.QueryTracer { return pgxTracer{} }
-
-type pgxTracer struct{}
-
-func (pgxTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	return context.WithValue(ctx, queryStartKey{}, queryStart{started: time.Now(), sql: data.SQL, args: data.Args})
+func ConfigureTracing() func(context.Context) error {
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", "migration-platform"))),
+		sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(spanLogger{})),
+	)
+	otel.SetTracerProvider(provider)
+	return provider.Shutdown
 }
 
-func (pgxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	started, _ := ctx.Value(queryStartKey{}).(queryStart)
-	if started.started.IsZero() {
-		started.started = time.Now()
-	}
-	rows := int64(0)
-	if data.Err == nil {
-		rows = data.CommandTag.RowsAffected()
-	}
-	SQL(ctx, started.sql, redactArgs(started.args), started.started, rows, data.Err, sqlState(data.Err), "phase", "query")
-}
+type spanLogger struct{}
 
-func (pgxTracer) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
-	return context.WithValue(ctx, batchStartKey{}, time.Now())
-}
-
-func (pgxTracer) TraceBatchQuery(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchQueryData) {
-	started, _ := ctx.Value(batchStartKey{}).(time.Time)
-	if started.IsZero() {
-		started = time.Now()
-	}
-	rows := int64(0)
-	if data.Err == nil {
-		rows = data.CommandTag.RowsAffected()
-	}
-	SQL(ctx, data.SQL, redactArgs(data.Args), started, rows, data.Err, sqlState(data.Err), "phase", "batch")
-}
-
-func (pgxTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchEndData) {
-	if data.Err != nil {
-		Log(ctx, slog.LevelError, "sql.batch", "status", "error", "error", data.Err.Error())
-		return
-	}
-	Log(ctx, slog.LevelInfo, "sql.batch", "status", "success")
-}
-
-func redactArgs(args []any) map[string]any {
-	out := make(map[string]any, len(args))
-	for i, arg := range args {
-		key := fmt.Sprintf("arg_%d", i+1)
-		// Positional SQL arguments do not carry field names. Strings and byte
-		// slices are therefore redacted by default; numeric values remain useful
-		// for diagnostics without exposing credentials or user data.
-		switch arg.(type) {
-		case string, []byte, []int64:
-			out[key] = "[REDACTED]"
-		default:
-			out[key] = arg
+func (spanLogger) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	for _, span := range spans {
+		id := span.SpanContext()
+		attrs := []any{
+			"event", "span.end", "span_name", span.Name(),
+			"trace_id", id.TraceID().String(), "span_id", id.SpanID().String(),
+			"status", span.Status().Code.String(),
+			"duration_ms", float64(span.EndTime().Sub(span.StartTime()).Microseconds()) / 1000,
 		}
+		if parent := span.Parent(); parent.IsValid() {
+			attrs = append(attrs, "parent_span_id", parent.SpanID().String())
+		}
+		if span.Status().Description != "" {
+			attrs = append(attrs, "failure", span.Status().Description)
+		}
+		for _, field := range span.Attributes() {
+			attrs = append(attrs, string(field.Key), field.Value.AsInterface())
+		}
+		slog.InfoContext(ctx, "span.end", attrs...)
 	}
-	return out
+	return nil
 }
 
-func sqlState(err error) string {
-	if err == nil {
-		return ""
-	}
-	if state, ok := err.(interface{ SQLState() string }); ok {
+func (spanLogger) Shutdown(context.Context) error { return nil }
+
+func SQLState(err error) string {
+	var state interface{ SQLState() string }
+	if errors.As(err, &state) {
 		return state.SQLState()
 	}
 	return ""
 }
 
-var sensitiveName = regexp.MustCompile(`(?i)(password|passwd|secret|token|session|credential|authorization|cookie|api[_-]?key)`)
-
-func Redact(key string, value any) any {
-	if sensitiveName.MatchString(key) {
-		return "[REDACTED]"
+func safeError(err error) string {
+	if code := SQLState(err); code != "" {
+		return "PostgreSQL SQLSTATE " + code
 	}
-	return value
-}
-
-func RedactParams(params map[string]any) map[string]any {
-	out := make(map[string]any, len(params))
-	for key, value := range params {
-		out[key] = Redact(key, value)
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "operation canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "operation timed out"
+	default:
+		return fmt.Sprintf("%T", err)
 	}
-	return out
-}
-
-func SQL(ctx context.Context, query string, params map[string]any, started time.Time, rows int64, err error, sqlState string, attrs ...any) {
-	fields := []any{
-		"query", query,
-		"parameters", RedactParams(params),
-		"duration_ms", float64(time.Since(started).Microseconds()) / 1000,
-		"row_count", rows,
-	}
-	if err != nil {
-		fields = append(fields, "status", "error", "error", err.Error())
-		if sqlState != "" {
-			fields = append(fields, "sqlstate", sqlState)
-		}
-	} else {
-		fields = append(fields, "status", "success")
-	}
-	fields = append(fields, attrs...)
-	Log(ctx, slog.LevelInfo, "sql", fields...)
-}
-
-func Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		correlationID := r.Header.Get("X-Correlation-ID")
-		traceID, spanID := parseTraceparent(r.Header.Get("traceparent"))
-		ctx := WithIdentifiers(r.Context(), correlationID, traceID, spanID)
-		ctx, span := Start(ctx, "http "+r.Method+" "+r.URL.Path)
-		w.Header().Set("X-Correlation-ID", CorrelationID(ctx))
-		attrs := []any{"method", r.Method, "path", r.URL.Path, "status", "started"}
-		if user, ok := access.UserFromContext(ctx); ok {
-			attrs = append(attrs, "actor", user.ID)
-		}
-		Log(ctx, slog.LevelInfo, "http.request", attrs...)
-		next.ServeHTTP(w, r.WithContext(ctx))
-		Log(ctx, slog.LevelInfo, "http.result", "method", r.Method, "path", r.URL.Path, "status", "completed")
-		span.End(nil)
-	})
-}
-
-func parseTraceparent(value string) (string, string) {
-	parts := strings.Split(value, "-")
-	if len(parts) == 4 && len(parts[1]) == 32 && len(parts[2]) == 16 {
-		return parts[1], parts[2]
-	}
-	return newID(16), newID(8)
-}
-
-func Traceparent(ctx context.Context) string {
-	return fmt.Sprintf("00-%s-%s-01", TraceID(ctx), SpanID(ctx))
 }

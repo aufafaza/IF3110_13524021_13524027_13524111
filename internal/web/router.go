@@ -48,7 +48,7 @@ func New(d Deps) http.Handler {
 		d.MigrationJobs.RegisterRoutes(mux)
 	}
 
-	return d.Authenticate.Middleware(observability.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux)))
+	return observability.Middleware(d.Authenticate.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux)))
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {

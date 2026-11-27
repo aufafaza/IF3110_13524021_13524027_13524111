@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 )
 
 func RequireDBAccess(checker DatabaseChecker, min Level) func(http.Handler) http.Handler {
@@ -22,6 +24,7 @@ func RequireDBAccess(checker DatabaseChecker, min Level) func(http.Handler) http
 				return
 			}
 
+			r = r.WithContext(observability.WithDatabase(r.Context(), dbID))
 			level, err := checker.EffectiveLevel(r.Context(), user.ID, dbID)
 			if err != nil {
 				WriteAPIError(w, "failed to verify database access", http.StatusInternalServerError)

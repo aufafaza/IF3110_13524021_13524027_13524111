@@ -20,6 +20,7 @@ func approvalFromReview(review migration.Review) Approval {
 		RequestID: review.RequestID, ActorID: review.RequestedBy, DatabaseID: review.DatabaseID,
 		MigrationID: review.MigrationID, Revision: review.Revision, Operation: review.Operation, Mode: review.Mode,
 		TargetExecutionID: review.TargetExecutionID,
+		Traceparent:       review.Trace.Traceparent, Tracestate: review.Trace.Tracestate, CorrelationID: review.Trace.CorrelationID,
 	}
 }
 

@@ -56,9 +56,9 @@ func (s *Store) enqueue(ctx context.Context, a Approval) (Job, error) {
 	}
 
 	_, err := s.pool.Exec(ctx, `INSERT INTO migration_async_jobs
-		(request_id, actor_id, database_id, migration_id, revision, operation, target_execution_id, traceparent, tracestate, mode)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (request_id) DO NOTHING`,
-		a.RequestID, a.ActorID, a.DatabaseID, a.MigrationID, a.Revision, a.Operation, a.TargetExecutionID, a.Traceparent, a.Tracestate, a.Mode)
+		(request_id, actor_id, database_id, migration_id, revision, operation, target_execution_id, traceparent, tracestate, mode, correlation_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (request_id) DO NOTHING`,
+		a.RequestID, a.ActorID, a.DatabaseID, a.MigrationID, a.Revision, a.Operation, a.TargetExecutionID, a.Traceparent, a.Tracestate, a.Mode, a.CorrelationID)
 	if err != nil {
 		return Job{}, err
 	}
@@ -131,9 +131,9 @@ func (s *Store) claim(ctx context.Context, lease time.Duration) (claim, error) {
 			ORDER BY j.eligible_at, j.id
 			LIMIT 1 FOR UPDATE OF j SKIP LOCKED
 		)
-		RETURNING `+jobColumns+`, request_id, actor_id, traceparent, tracestate, claim_token::text, attempt_limit, batch_failures, batch_pending`,
+		RETURNING `+jobColumns+`, request_id, actor_id, traceparent, tracestate, correlation_id, claim_token::text, attempt_limit, batch_failures, batch_pending`,
 		lease.Microseconds()).Scan(append(jobFields(&c.Job), &c.approval.RequestID, &c.approval.ActorID,
-		&c.approval.Traceparent, &c.approval.Tracestate, &c.token, &c.attemptLimit, &c.batchFailures, &c.batchPending)...)
+		&c.approval.Traceparent, &c.approval.Tracestate, &c.approval.CorrelationID, &c.token, &c.attemptLimit, &c.batchFailures, &c.batchPending)...)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "migration_async_database_owner" {
 		return claim{}, pgx.ErrNoRows

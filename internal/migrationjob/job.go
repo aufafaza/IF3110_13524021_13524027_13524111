@@ -3,9 +3,13 @@ package migrationjob
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -48,6 +52,7 @@ type Approval struct {
 	Mode              string
 	Traceparent       string
 	Tracestate        string
+	CorrelationID     string
 }
 
 type ApprovalSource interface {
@@ -123,11 +128,33 @@ func NewDispatcher(store *Store, source ApprovalSource) *Dispatcher {
 	return &Dispatcher{store: store, source: source}
 }
 
-func (d *Dispatcher) Dispatch(ctx context.Context, approved Approval) (Job, error) {
+func approvalContext(ctx context.Context, approved Approval) context.Context {
+	ctx = observability.Restore(ctx, observability.Propagation{
+		Traceparent: approved.Traceparent, Tracestate: approved.Tracestate, CorrelationID: approved.CorrelationID,
+	})
+	return observability.WithFields(ctx, attribute.Int64("actor_id", approved.ActorID),
+		attribute.Int64("database_id", approved.DatabaseID), attribute.Int64("migration_id", approved.MigrationID),
+		attribute.String("operation", approved.Operation))
+}
+
+func (d *Dispatcher) Dispatch(ctx context.Context, approved Approval) (job Job, retErr error) {
+	parent := trace.SpanContextFromContext(ctx)
+	ctx = approvalContext(ctx, approved)
+	ctx, span := observability.Start(ctx, "migration.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
+	defer func() { span.End(retErr) }()
+	if parent.IsValid() && parent.TraceID() != trace.SpanContextFromContext(ctx).TraceID() {
+		span.AddLink(trace.Link{SpanContext: parent})
+	}
+	propagation := observability.Capture(ctx)
+	approved.Traceparent, approved.Tracestate, approved.CorrelationID =
+		propagation.Traceparent, propagation.Tracestate, propagation.CorrelationID
 	job, err := d.store.enqueue(ctx, approved)
 	if err != nil {
 		return Job{}, err
 	}
+	span.SetAttributes(attribute.Int64("job_id", job.ID), attribute.String("execution_id", job.ExecutionID))
+	ctx = observability.WithFields(ctx, attribute.Int64("job_id", job.ID), attribute.String("execution_id", job.ExecutionID))
+	observability.Log(ctx, slog.LevelInfo, "migration.dispatched", "status", job.State)
 	return job, d.source.AcknowledgeDispatch(ctx, approved.RequestID, job.ID)
 }
 

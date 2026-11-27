@@ -14,6 +14,9 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -58,9 +61,10 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) Step(ctx context.Context) (bool, error) {
+func (w *Worker) Step(ctx context.Context) (_ bool, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, stepTimeout)
 	defer cancel()
+	claimedAt := time.Now()
 	c, err := w.store.claim(ctx, claimLease)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -68,6 +72,13 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	ctx = observability.WithFields(approvalContext(ctx, c.approval),
+		attribute.Int64("job_id", c.ID), attribute.String("execution_id", c.ExecutionID))
+	ctx, span := observability.Start(ctx, "migration.worker", trace.WithSpanKind(trace.SpanKindConsumer), trace.WithTimestamp(claimedAt))
+	defer func() { span.End(retErr) }()
+	claimCtx, claimSpan := observability.Start(ctx, "migration.claim", trace.WithTimestamp(claimedAt))
+	observability.Log(claimCtx, slog.LevelInfo, "migration.claimed", "status", c.State)
+	claimSpan.End(nil)
 	if w.afterClaim != nil {
 		w.afterClaim()
 	}
@@ -76,13 +87,28 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
+	if a.id != "" {
+		ctx = withAttempt(ctx, a.id, c.Attempts)
+	}
 	if a.finishedAt != nil && a.deliveredAt == nil {
 		return true, w.report(ctx, c, a)
 	}
 	return true, w.processTarget(ctx, c, a)
 }
 
-func (w *Worker) report(ctx context.Context, c claim, a attempt) error {
+func withAttempt(ctx context.Context, id string, number int) context.Context {
+	return observability.WithFields(ctx, attribute.String("attempt_id", id), attribute.Int("attempt", number))
+}
+
+func (w *Worker) report(ctx context.Context, c claim, a attempt) (retErr error) {
+	ctx, span := observability.Start(ctx, "migration.history")
+	defer func() { span.End(retErr) }()
+	status := "succeeded"
+	if a.failureCode != "" {
+		status = "failed"
+		observability.Failure(ctx, a.failureCode)
+	}
+	observability.Log(ctx, slog.LevelInfo, "migration.attempt.result", "status", status, "failure_code", a.failureCode)
 	outcome := Outcome{
 		Approval: c.approval, JobID: c.ID, ExecutionID: c.ExecutionID, AttemptID: a.id,
 		Attempt: c.Attempts, SQL: a.sql, StartedAt: a.startedAt, FinishedAt: *a.finishedAt,
@@ -123,7 +149,10 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 		_ = tx.Rollback(rbCtx)
 	}()
 
-	locked, err := migration.TryTargetTransactionLock(ctx, tx, c.DatabaseID)
+	lockCtx, lockSpan := observability.Start(ctx, "migration.lock")
+	locked, err := migration.TryTargetTransactionLock(lockCtx, tx, c.DatabaseID)
+	observability.Log(lockCtx, slog.LevelInfo, "migration.lock.result", "acquired", locked)
+	lockSpan.End(err)
 	if err != nil {
 		return w.deferStep(ctx, c, waitState, "target_unavailable")
 	}
@@ -188,13 +217,20 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 	return w.execute(ctx, tx, c, a.id, planHash, plan.SQL)
 }
 
-func (w *Worker) execute(ctx context.Context, tx pgx.Tx, c claim, attemptID, planHash, sql string) error {
+func (w *Worker) execute(ctx context.Context, tx pgx.Tx, c claim, attemptID, planHash, sql string) (retErr error) {
+	ctx, span := observability.Start(withAttempt(ctx, attemptID, c.Attempts), "migration.execute")
+	defer func() { span.End(retErr) }()
+	observability.Log(ctx, slog.LevelInfo, "migration.attempt.start", "status", "started")
 	for _, statement := range migration.SplitStatements(sql) {
-		if _, err := tx.Conn().PgConn().ExecParams(ctx, statement, nil, nil, nil, nil).Close(); err != nil {
+		queryCtx, query := observability.StartQuery(ctx, statement, 0)
+		tag, err := tx.Conn().PgConn().ExecParams(queryCtx, statement, nil, nil, nil, nil).Close()
+		query.End(tag.RowsAffected(), err)
+		if err != nil {
 			if rbErr := tx.Rollback(ctx); rbErr != nil {
 				return w.deferStep(ctx, c, Reconciling, "rollback_unverified")
 			}
 			code, retryable := executionFailure(err)
+			observability.Failure(ctx, code)
 			return w.store.finishAttempt(ctx, c, time.Now().UTC(), code, retryable)
 		}
 	}
@@ -226,6 +262,10 @@ func (w *Worker) dependencyFailure(ctx context.Context, c claim, err error) erro
 }
 
 func (w *Worker) deferStep(ctx context.Context, c claim, state State, code string) error {
+	observability.Log(ctx, slog.LevelInfo, "migration.waiting", "status", state, "reason", code)
+	if code != "target_busy" {
+		observability.Failure(ctx, code)
+	}
 	return w.store.reschedule(ctx, c, state, code, retryDelay)
 }
 

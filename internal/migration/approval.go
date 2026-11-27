@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 )
 
 type ReviewStatus string
@@ -35,20 +36,21 @@ type ReviewDecision struct {
 }
 
 type Review struct {
-	RequestID         string           `json:"request_id"`
-	MigrationID       int64            `json:"migration_id"`
-	DatabaseID        int64            `json:"database_id"`
-	Revision          string           `json:"revision"`
-	Operation         string           `json:"operation"`
-	Mode              string           `json:"mode"`
-	TargetExecutionID string           `json:"target_execution_id,omitempty"`
-	RequestedBy       int64            `json:"requested_by"`
-	Status            ReviewStatus     `json:"status"`
-	CreatedAt         time.Time        `json:"created_at"`
-	DecidedAt         *time.Time       `json:"decided_at,omitempty"`
-	EnqueuedAt        *time.Time       `json:"enqueued_at,omitempty"`
-	JobID             *int64           `json:"job_id,omitempty"`
-	Decisions         []ReviewDecision `json:"decisions"`
+	Trace             observability.Propagation `json:"-"`
+	RequestID         string                    `json:"request_id"`
+	MigrationID       int64                     `json:"migration_id"`
+	DatabaseID        int64                     `json:"database_id"`
+	Revision          string                    `json:"revision"`
+	Operation         string                    `json:"operation"`
+	Mode              string                    `json:"mode"`
+	TargetExecutionID string                    `json:"target_execution_id,omitempty"`
+	RequestedBy       int64                     `json:"requested_by"`
+	Status            ReviewStatus              `json:"status"`
+	CreatedAt         time.Time                 `json:"created_at"`
+	DecidedAt         *time.Time                `json:"decided_at,omitempty"`
+	EnqueuedAt        *time.Time                `json:"enqueued_at,omitempty"`
+	JobID             *int64                    `json:"job_id,omitempty"`
+	Decisions         []ReviewDecision          `json:"decisions"`
 }
 
 type QueueJob struct {
@@ -196,10 +198,11 @@ func (r *PostgresApprovalRepository) SubmitReview(ctx context.Context, p SubmitR
 	}
 
 	requestID := newRequestID()
+	trace := observability.Capture(ctx)
 	tag, err := tx.Exec(ctx, `INSERT INTO migration_review_requests
-		(request_id,migration_id,revision,operation,requested_by,target_execution_id,mode)
-		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (migration_id,revision,operation,target_execution_id) WHERE superseded_at IS NULL DO NOTHING`,
-		requestID, p.MigrationID, p.Revision, op, p.RequestedBy, p.TargetExecutionID, p.Mode)
+		(request_id,migration_id,revision,operation,requested_by,target_execution_id,mode,traceparent,tracestate,correlation_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (migration_id,revision,operation,target_execution_id) WHERE superseded_at IS NULL DO NOTHING`,
+		requestID, p.MigrationID, p.Revision, op, p.RequestedBy, p.TargetExecutionID, p.Mode, trace.Traceparent, trace.Tracestate, trace.CorrelationID)
 	if err != nil {
 		return Review{}, fmt.Errorf("migration: create review: %w", err)
 	}
@@ -237,12 +240,12 @@ func (r *PostgresApprovalRepository) FindByRevision(ctx context.Context, migrati
 }
 
 const reviewColumns = `q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,
-	q.target_execution_id,q.mode,q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id`
+	q.target_execution_id,q.mode,q.status,q.created_at,q.decided_at,CASE WHEN q.async_job_id IS NOT NULL THEN q.enqueued_at END,q.async_job_id,q.traceparent,q.tracestate,q.correlation_id`
 
 func (r *PostgresApprovalRepository) GetReview(ctx context.Context, requestID string) (Review, error) {
 	var out Review
 	var status string
-	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &out.TargetExecutionID, &out.Mode, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID)
+	err := r.pool.QueryRow(ctx, `SELECT `+reviewColumns+` FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id WHERE q.request_id=$1`, requestID).Scan(&out.RequestID, &out.MigrationID, &out.DatabaseID, &out.Revision, &out.Operation, &out.RequestedBy, &out.TargetExecutionID, &out.Mode, &status, &out.CreatedAt, &out.DecidedAt, &out.EnqueuedAt, &out.JobID, &out.Trace.Traceparent, &out.Trace.Tracestate, &out.Trace.CorrelationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Review{}, ErrReviewNotFound
 	}
@@ -371,8 +374,11 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 	if decision == "rejected" {
 		_, err = tx.Exec(ctx, `UPDATE migration_review_requests SET status='rejected',decided_at=now() WHERE request_id=$1`, requestID)
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE migration_review_requests q SET status='approved',decided_at=now()
-			FROM migrations m WHERE q.migration_id=m.id AND q.request_id=$1 AND `+allCurrentGroupsApproved, requestID)
+		trace := observability.Capture(ctx)
+		_, err = tx.Exec(ctx, `UPDATE migration_review_requests q SET status='approved',decided_at=now(),
+			traceparent=$2,tracestate=$3,correlation_id=$4
+			FROM migrations m WHERE q.migration_id=m.id AND q.request_id=$1 AND `+allCurrentGroupsApproved,
+			requestID, trace.Traceparent, trace.Tracestate, trace.CorrelationID)
 	}
 	if err != nil {
 		return Review{}, err
@@ -384,7 +390,8 @@ func (r *PostgresApprovalRepository) DecideReview(ctx context.Context, requestID
 }
 
 func (r *PostgresApprovalRepository) PendingApprovedOperations(ctx context.Context) ([]Review, error) {
-	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,q.target_execution_id,q.mode
+	rows, err := r.pool.Query(ctx, `SELECT q.request_id,q.migration_id,m.database_id,q.revision,q.operation,q.requested_by,q.target_execution_id,q.mode,
+		q.traceparent,q.tracestate,q.correlation_id
 		FROM migration_review_requests q JOIN migrations m ON m.id=q.migration_id
 		WHERE q.status='approved' AND q.async_job_id IS NULL AND q.superseded_at IS NULL
 		  AND (q.operation='apply' OR (q.operation IN ('rollback','forward','batch_recovery','compensation') AND q.target_execution_id<>''))
@@ -395,7 +402,8 @@ func (r *PostgresApprovalRepository) PendingApprovedOperations(ctx context.Conte
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Review, error) {
 		var review Review
 		err := row.Scan(&review.RequestID, &review.MigrationID, &review.DatabaseID, &review.Revision,
-			&review.Operation, &review.RequestedBy, &review.TargetExecutionID, &review.Mode)
+			&review.Operation, &review.RequestedBy, &review.TargetExecutionID, &review.Mode,
+			&review.Trace.Traceparent, &review.Trace.Tracestate, &review.Trace.CorrelationID)
 		return review, err
 	})
 }

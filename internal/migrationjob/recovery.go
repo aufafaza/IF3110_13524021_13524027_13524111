@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (c claim) batchRoot() string {
@@ -244,8 +246,11 @@ func verifyBatchRows(ctx context.Context, tx pgx.Tx, executionID string, table m
 	return err
 }
 
-func (w *Worker) compensatePage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) error {
+func (w *Worker) compensatePage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) (retErr error) {
 	sequence := p.batches - p.compensatedBatches
+	ctx = observability.WithFields(withAttempt(ctx, a.id, c.Attempts), attribute.Int64("batch_sequence", sequence))
+	ctx, span := observability.Start(ctx, "migration.batch.compensate")
+	defer func() { span.End(retErr) }()
 	rows, err := tx.Query(ctx, `SELECT scope.key FROM migration_worker.batch_checkpoints checkpoint
 		JOIN migration_worker.batch_scope scope ON scope.execution_id=checkpoint.execution_id
 		LEFT JOIN migration_worker.batch_checkpoints prev
