@@ -32,6 +32,9 @@ func New(d Deps) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", health)
+	// Metrics are outside user-session authentication so Prometheus can scrape
+	// them using network policy or a service-level credential.
+	mux.Handle("GET /metrics", observability.MetricsHandler())
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static.FS)))
 
 	d.Auth.RegisterRoutes(mux)
@@ -48,7 +51,7 @@ func New(d Deps) http.Handler {
 		d.MigrationJobs.RegisterRoutes(mux)
 	}
 
-	return d.Authenticate.Middleware(observability.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux)))
+	return observability.Middleware(d.Authenticate.Middleware(csrf.Protect(csrf.PreSessionCookie)(mux)))
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {

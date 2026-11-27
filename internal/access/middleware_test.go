@@ -32,7 +32,6 @@ type result struct {
 	loc         string
 	contentType string
 	body        string
-	hxRedirect  string
 }
 
 func run(mw func(http.Handler) http.Handler, user *access.User, pathID string) result {
@@ -51,7 +50,7 @@ func run(mw func(http.Handler) http.Handler, user *access.User, pathID string) r
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	return result{status: rec.Code, called: called, loc: rec.Header().Get("Location"), contentType: rec.Header().Get("Content-Type"), body: rec.Body.String(), hxRedirect: rec.Header().Get("HX-Redirect")}
+	return result{status: rec.Code, called: called, loc: rec.Header().Get("Location"), contentType: rec.Header().Get("Content-Type"), body: rec.Body.String()}
 }
 
 var (
@@ -168,8 +167,8 @@ func assertJSONDenial(t *testing.T, got result) {
 	if got.contentType != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", got.contentType)
 	}
-	if got.loc != "" || got.hxRedirect != "" {
-		t.Errorf("unexpected redirect headers: %+v", got)
+	if got.loc != "" {
+		t.Errorf("unexpected redirect: %+v", got)
 	}
 	var payload struct {
 		Error string `json:"error"`

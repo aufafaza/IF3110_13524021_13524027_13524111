@@ -22,5 +22,6 @@ func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, fmt.Errorf("platformdb: ping: %w", err)
 	}
+	observability.RegisterPool("platform", pool)
 	return pool, nil
 }

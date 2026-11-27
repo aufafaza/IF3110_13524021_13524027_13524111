@@ -66,6 +66,7 @@ func connect(ctx context.Context, in DatabaseInput) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, mapConnError(err)
 	}
+	observability.RegisterPool("target", pool)
 	return pool, nil
 }
 

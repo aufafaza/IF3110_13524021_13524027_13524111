@@ -1,0 +1,5 @@
+{
+  "title": "Add notes to demo customers",
+  "sql": "ALTER TABLE demo_customers ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';",
+  "down_sql": "ALTER TABLE demo_customers DROP COLUMN IF EXISTS notes;"
+}

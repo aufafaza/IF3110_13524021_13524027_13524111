@@ -3,11 +3,20 @@ package migration
 import "strings"
 
 type Plan struct {
-	Operation             Operation `json:"operation"`
-	MigrationID           int64     `json:"migration_id"`
-	Revision              int       `json:"revision"`
-	SQL                   string    `json:"sql"`
-	RollbackOfExecutionID *string   `json:"rollback_of_execution_id,omitempty"`
+	BatchConfig           *BatchConfig `json:"batch_config,omitempty"`
+	Operation             Operation    `json:"operation"`
+	MigrationID           int64        `json:"migration_id"`
+	Revision              int          `json:"revision"`
+	SQL                   string       `json:"sql"`
+	TargetExecutionID     string       `json:"target_execution_id,omitempty"`
+	RollbackOfExecutionID *string      `json:"rollback_of_execution_id,omitempty"`
+}
+
+func (p Plan) Mode() string {
+	if p.BatchConfig != nil {
+		return "batch"
+	}
+	return "ordinary"
 }
 
 func ValidateDefinition(up string, down, reason *string) error {
@@ -27,7 +36,7 @@ func ValidateDefinition(up string, down, reason *string) error {
 }
 
 func PlanApply(m Migration) Plan {
-	return Plan{Operation: OpApply, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL}
+	return Plan{Operation: OpApply, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL, BatchConfig: m.BatchConfig}
 }
 
 func PlanRollback(m Migration, entries []HistoryEntry) (Plan, error) {
@@ -47,41 +56,44 @@ func PlanRollback(m Migration, entries []HistoryEntry) (Plan, error) {
 	}
 	target := top.ExecutionID
 	return Plan{Operation: OpRollback, MigrationID: m.ID, Revision: m.Revision,
-		SQL: *m.DownSQL, RollbackOfExecutionID: &target}, nil
+		SQL: *m.DownSQL, TargetExecutionID: target, RollbackOfExecutionID: &target}, nil
 }
 
-func NextForward(entries []HistoryEntry) (int64, bool) {
-	var stack []int64
+func nextForward(entries []HistoryEntry) (HistoryEntry, bool) {
+	var stack []HistoryEntry
 	for _, e := range DedupeAttempts(entries) {
 		if e.Status != AttemptSucceeded {
 			continue
 		}
 		switch e.Operation {
 		case OpRollback:
-			stack = append(stack, e.MigrationID)
+			stack = append(stack, e)
 		case OpForward:
-			if n := len(stack); n > 0 && stack[n-1] == e.MigrationID {
+			if n := len(stack); n > 0 && stack[n-1].MigrationID == e.MigrationID {
 				stack = stack[:n-1]
 			}
-		case OpApply:
+		case OpApply, OpBatchRecovery:
 			stack = nil
 		}
 	}
 	if len(stack) == 0 {
-		return 0, false
+		return HistoryEntry{}, false
 	}
 	return stack[len(stack)-1], true
 }
 
 func PlanForward(m Migration, entries []HistoryEntry) (Plan, error) {
-	id, ok := NextForward(entries)
+	target, ok := nextForward(entries)
 	if !ok {
 		return Plan{}, ErrNothingToForward
 	}
-	if id != m.ID {
+	if target.MigrationID != m.ID {
 		return Plan{}, ErrNotLatestActive
 	}
-	return Plan{Operation: OpForward, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL}, nil
+	if target.Revision != m.Revision {
+		return Plan{}, ErrImmutable
+	}
+	return Plan{Operation: OpForward, MigrationID: m.ID, Revision: m.Revision, SQL: m.SQL, TargetExecutionID: target.ExecutionID}, nil
 }
 
 // PlanApplyFor: apply hanya untuk migrasi yang belum pernah berhasil.
@@ -97,7 +109,7 @@ func PlanApplyFor(m Migration, entries []HistoryEntry) (Plan, error) {
 		}
 	}
 	for _, e := range DedupeAttempts(entries) {
-		if e.MigrationID == m.ID && e.Status == AttemptSucceeded && e.Operation != OpRollback {
+		if e.MigrationID == m.ID && e.Status == AttemptSucceeded && e.Operation != OpRollback && e.Operation != OpCompensation {
 			return Plan{}, ErrNotDraft
 		}
 	}

@@ -1,0 +1,17 @@
+[
+  {
+    "username": "demo_editor",
+    "password": "demo-editor",
+    "platform_admin": false
+  },
+  {
+    "username": "demo_leader",
+    "password": "demo-leader",
+    "platform_admin": false
+  },
+  {
+    "username": "demo_auditor",
+    "password": "demo-auditor",
+    "platform_admin": false
+  }
+]

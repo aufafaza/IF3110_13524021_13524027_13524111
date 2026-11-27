@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,9 +13,20 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 )
 
-type Handler struct{ service *Service }
+type ReviewDispatcher interface {
+	DispatchReview(context.Context, Review) (QueueJob, error)
+}
+
+type Handler struct {
+	service *Service
+	queue   ReviewDispatcher
+}
 
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+
+func NewQueuedHandler(service *Service, queue ReviewDispatcher) *Handler {
+	return &Handler{service: service, queue: queue}
+}
 
 var errInvalidRequest = errors.New("migration: invalid request")
 
@@ -40,11 +52,13 @@ func (h *Handler) handleListHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type migrationInput struct {
-	Title              string  `json:"title"`
-	SQL                string  `json:"sql"`
-	Action             string  `json:"action"`
-	DownSQL            *string `json:"down_sql"`
-	IrreversibleReason *string `json:"irreversible_reason"`
+	Title              string       `json:"title"`
+	SQL                string       `json:"sql"`
+	Action             string       `json:"action"`
+	DownSQL            *string      `json:"down_sql"`
+	IrreversibleReason *string      `json:"irreversible_reason"`
+	BatchConfig        *BatchConfig `json:"batch_config"`
+	Mode               string       `json:"mode"`
 }
 
 func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +75,13 @@ func (h *Handler) handleCreateOrPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	var created Migration
 	var err error
-	if in.DownSQL != nil || in.IrreversibleReason != nil {
+	if in.Mode != "" || in.BatchConfig != nil {
+		if !validBatchInputMode(in) {
+			writeError(w, ErrInvalidBatch)
+			return
+		}
+		created, err = h.service.CreateDraftWithBatchConfig(r.Context(), user.ID, dbID, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason, in.BatchConfig)
+	} else if in.DownSQL != nil || in.IrreversibleReason != nil {
 		created, err = h.service.CreateDraftWithDefinition(r.Context(), user.ID, dbID, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason)
 	} else {
 		created, err = h.service.CreateDraft(r.Context(), user.ID, dbID, in.Title, in.SQL)
@@ -88,7 +108,13 @@ func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	var updated Migration
 	var err error
-	if in.DownSQL != nil || in.IrreversibleReason != nil {
+	if in.Mode != "" || in.BatchConfig != nil {
+		if !validBatchInputMode(in) {
+			writeError(w, ErrInvalidBatch)
+			return
+		}
+		updated, err = h.service.UpdateDraftWithBatchConfig(r.Context(), user.ID, dbID, id, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason, in.BatchConfig, true)
+	} else if in.DownSQL != nil || in.IrreversibleReason != nil {
 		updated, err = h.service.UpdateDraftWithDefinition(r.Context(), user.ID, dbID, id, in.Title, in.SQL, in.DownSQL, in.IrreversibleReason)
 	} else {
 		updated, err = h.service.UpdateDraft(r.Context(), user.ID, dbID, id, in.Title, in.SQL)
@@ -98,6 +124,19 @@ func (h *Handler) handleUpdateOrPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func validBatchInputMode(in migrationInput) bool {
+	switch in.Mode {
+	case "":
+		return true
+	case "ordinary":
+		return in.BatchConfig == nil
+	case "batch":
+		return in.BatchConfig != nil
+	default:
+		return false
+	}
 }
 
 func (h *Handler) preview(w http.ResponseWriter, r *http.Request, userID, dbID int64, in migrationInput) bool {
@@ -178,6 +217,28 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ErrConfirmationMissing)
 		return
 	}
+	if h.queue != nil {
+		op, err := normalizeOperation(in.Operation)
+		if err != nil || op != string(OpApply) {
+			writeError(w, ErrInvalidOperation)
+			return
+		}
+		m, review, err := h.service.ApprovedApply(r.Context(), user.ID, dbID, id)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		job, err := h.queue.DispatchReview(r.Context(), review)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, struct {
+			Migration
+			JobID int64 `json:"job_id"`
+		}{m, job.ID})
+		return
+	}
 	executed, err := h.service.ExecuteOperation(r.Context(), user.ID, dbID, id, in.Operation)
 	if err != nil {
 		if executed.ID != 0 && executed.Status == StatusFailed {
@@ -190,18 +251,47 @@ func (h *Handler) handleExecute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, executed)
 }
 
+func (h *Handler) handleCurrentOperationReview(w http.ResponseWriter, r *http.Request) {
+	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
+	if !ok {
+		return
+	}
+	var revision int
+	if raw := r.URL.Query().Get("revision"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			writeError(w, errInvalidRequest)
+			return
+		}
+		revision = value
+	}
+	review, err := h.service.CurrentOperationReview(r.Context(), user.ID, dbID, id, revision, r.URL.Query().Get("operation"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, review)
+}
+
 func (h *Handler) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 	user, dbID, id, ok := h.requireUserDBAndMigration(w, r)
 	if !ok {
 		return
 	}
 	var in struct {
-		Operation string `json:"operation"`
+		Operation         string `json:"operation"`
+		Revision          int    `json:"revision"`
+		TargetExecutionID string `json:"target_execution_id"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation)
+	if in.Revision < 0 {
+		writeError(w, errInvalidRequest)
+		return
+	}
+	review, err := h.service.SubmitReview(r.Context(), user.ID, dbID, id, in.Operation, in.Revision, in.TargetExecutionID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -237,13 +327,18 @@ func (h *Handler) handleReviewDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
+		GroupID  int64  `json:"group_id"`
 		Decision string `json:"decision"`
 		Comment  string `json:"comment"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	review, err := h.service.DecideReview(r.Context(), user.ID, requestID, in.Decision, in.Comment)
+	if in.GroupID < 0 {
+		writeError(w, errInvalidRequest)
+		return
+	}
+	review, err := h.service.DecideReview(r.Context(), user.ID, requestID, in.GroupID, in.Decision, in.Comment)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -257,7 +352,16 @@ func (h *Handler) handleEnqueueReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ErrUnauthenticated)
 		return
 	}
-	job, err := h.service.EnqueueApproved(r.Context(), user.ID, r.PathValue("requestID"))
+	if h.queue == nil {
+		writeError(w, ErrApprovalsUnavailable)
+		return
+	}
+	review, err := h.service.ReviewForDispatch(r.Context(), user.ID, r.PathValue("requestID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	job, err := h.queue.DispatchReview(r.Context(), review)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -336,17 +440,17 @@ func statusForError(err error) int {
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrForbidden):
 		return http.StatusForbidden
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrReviewNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch):
+	case errors.Is(err, ErrAlreadyApplied), errors.Is(err, ErrNotDraft), errors.Is(err, ErrVersionConflict), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrIrreversible), errors.Is(err, ErrImmutable), errors.Is(err, ErrNothingToForward), errors.Is(err, ErrRevisionMismatch), errors.Is(err, ErrOperationTargetChanged), errors.Is(err, ErrRecoveryUnavailable), errors.Is(err, ErrCompensationUnsafe), errors.Is(err, ErrBatchDirection):
 		return http.StatusConflict
 	case errors.Is(err, ErrReviewClosed), errors.Is(err, ErrRevisionChanged), errors.Is(err, ErrApprovalRequired), errors.Is(err, ErrQueueNotApproved):
 		return http.StatusConflict
 	case errors.Is(err, ErrNotGroupLeader), errors.Is(err, ErrLeaderMissing):
 		return http.StatusForbidden
-	case errors.Is(err, ErrInvalidOperation):
+	case errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrReviewGroupRequired), errors.Is(err, ErrInvalidDecision):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition), errors.Is(err, ErrInvalidAttempt):
+	case errors.Is(err, ErrEmptyTitle), errors.Is(err, ErrEmptySQL), errors.Is(err, ErrNonTransactionalSQL), errors.Is(err, ErrConfirmationMissing), errors.Is(err, ErrInvalidDefinition), errors.Is(err, ErrInvalidAttempt), errors.Is(err, ErrInvalidBatch):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

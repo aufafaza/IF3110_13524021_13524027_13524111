@@ -55,30 +55,14 @@ func (e *TargetPostgresExecutor) ExecInTx(ctx context.Context, databaseID int64,
 		}
 	}()
 
-	started := time.Now()
 	if _, err := tx.Exec(ctx, sql); err != nil {
-		observability.SQL(ctx, sql, nil, started, 0, err, sqlState(err), "database_id", databaseID, "phase", "execute")
 		return fmt.Errorf("migration: exec sql: %w", err)
 	}
-	observability.SQL(ctx, sql, nil, started, 0, nil, "", "database_id", databaseID, "phase", "execute")
-
 	if err := tx.Commit(ctx); err != nil {
-		observability.Log(ctx, slog.LevelError, "transaction.commit", "database_id", databaseID, "status", "error", "error", err.Error())
 		return fmt.Errorf("migration: commit tx: %w", err)
 	}
-	observability.Log(ctx, slog.LevelInfo, "transaction.commit", "database_id", databaseID, "status", "success")
 	committed = true
 	return nil
-}
-
-func sqlState(err error) string {
-	if err == nil {
-		return ""
-	}
-	if pgErr, ok := err.(interface{ SQLState() string }); ok {
-		return pgErr.SQLState()
-	}
-	return ""
 }
 
 type Runner struct {

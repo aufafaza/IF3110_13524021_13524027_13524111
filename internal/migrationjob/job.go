@@ -3,7 +3,13 @@ package migrationjob
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -15,14 +21,17 @@ const (
 type State string
 
 const (
-	Queued      State = "queued"
-	Running     State = "running"
-	Reconciling State = "reconciling"
-	Reporting   State = "reporting"
-	Retrying    State = "retrying"
-	Partial     State = "partial"
-	Succeeded   State = "succeeded"
-	Failed      State = "failed"
+	Queued            State = "queued"
+	Running           State = "running"
+	Reconciling       State = "reconciling"
+	Reporting         State = "reporting"
+	Retrying          State = "retrying"
+	Partial           State = "partial"
+	PartiallyReverted State = "partially_reverted"
+	Recovered         State = "recovered"
+	Compensated       State = "compensated"
+	Succeeded         State = "succeeded"
+	Failed            State = "failed"
 )
 
 var (
@@ -33,15 +42,17 @@ var (
 )
 
 type Approval struct {
-	RequestID   string
-	ActorID     int64
-	DatabaseID  int64
-	MigrationID int64
-	Revision    string
-	Operation   string
-	Mode        string
-	Traceparent string
-	Tracestate  string
+	RequestID         string
+	ActorID           int64
+	DatabaseID        int64
+	MigrationID       int64
+	Revision          string
+	Operation         string
+	TargetExecutionID string
+	Mode              string
+	Traceparent       string
+	Tracestate        string
+	CorrelationID     string
 }
 
 type ApprovalSource interface {
@@ -54,7 +65,7 @@ type Authorization interface {
 }
 
 type Plans interface {
-	ResolveSQL(context.Context, Approval) (string, error)
+	ResolvePlan(context.Context, Approval) (migration.Plan, error)
 }
 
 type BatchPlans interface {
@@ -62,6 +73,7 @@ type BatchPlans interface {
 }
 
 type BatchPlan struct {
+	Recovery *migration.BatchTable `json:",omitempty"`
 	ScopeSQL string
 	SQL      string
 	Size     int
@@ -69,15 +81,16 @@ type BatchPlan struct {
 
 type Outcome struct {
 	Approval
-	JobID       int64
-	ExecutionID string
-	AttemptID   string
-	Attempt     int
-	SQL         string
-	StartedAt   time.Time
-	FinishedAt  time.Time
-	FailureCode string     // empty on success
-	BatchPlan   *BatchPlan `json:",omitempty"`
+	JobID                 int64
+	ExecutionID           string
+	AttemptID             string
+	Attempt               int
+	SQL                   string
+	StartedAt             time.Time
+	FinishedAt            time.Time
+	FailureCode           string     // empty on success
+	RollbackOfExecutionID *string    `json:",omitempty"`
+	BatchPlan             *BatchPlan `json:",omitempty"`
 }
 
 type History interface {
@@ -85,22 +98,25 @@ type History interface {
 }
 
 type Job struct {
-	ID               int64     `json:"id"`
-	ExecutionID      string    `json:"execution_id"`
-	DatabaseID       int64     `json:"database_id"`
-	MigrationID      int64     `json:"migration_id"`
-	Revision         string    `json:"revision"`
-	Operation        string    `json:"operation"`
-	Mode             string    `json:"mode"`
-	ScopeRows        *int64    `json:"scope_rows,omitempty"`
-	CommittedBatches int64     `json:"committed_batches"`
-	CommittedRows    int64     `json:"committed_rows"`
-	BatchPaused      bool      `json:"batch_paused,omitempty"`
-	State            State     `json:"state"`
-	Attempts         int       `json:"attempts"`
-	FailureCode      string    `json:"failure_code,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                 int64     `json:"id"`
+	ExecutionID        string    `json:"execution_id"`
+	DatabaseID         int64     `json:"database_id"`
+	MigrationID        int64     `json:"migration_id"`
+	Revision           string    `json:"revision"`
+	Operation          string    `json:"operation"`
+	TargetExecutionID  string    `json:"target_execution_id,omitempty"`
+	Mode               string    `json:"mode"`
+	ScopeRows          *int64    `json:"scope_rows,omitempty"`
+	CommittedBatches   int64     `json:"committed_batches"`
+	CompensatedBatches int64     `json:"compensated_batches"`
+	CompensatedRows    int64     `json:"compensated_rows"`
+	CommittedRows      int64     `json:"committed_rows"`
+	BatchPaused        bool      `json:"batch_paused,omitempty"`
+	State              State     `json:"state"`
+	Attempts           int       `json:"attempts"`
+	FailureCode        string    `json:"failure_code,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Dispatcher struct {
@@ -112,11 +128,33 @@ func NewDispatcher(store *Store, source ApprovalSource) *Dispatcher {
 	return &Dispatcher{store: store, source: source}
 }
 
-func (d *Dispatcher) Dispatch(ctx context.Context, approved Approval) (Job, error) {
+func approvalContext(ctx context.Context, approved Approval) context.Context {
+	ctx = observability.Restore(ctx, observability.Propagation{
+		Traceparent: approved.Traceparent, Tracestate: approved.Tracestate, CorrelationID: approved.CorrelationID,
+	})
+	return observability.WithFields(ctx, attribute.Int64("actor_id", approved.ActorID),
+		attribute.Int64("database_id", approved.DatabaseID), attribute.Int64("migration_id", approved.MigrationID),
+		attribute.String("operation", approved.Operation))
+}
+
+func (d *Dispatcher) Dispatch(ctx context.Context, approved Approval) (job Job, retErr error) {
+	parent := trace.SpanContextFromContext(ctx)
+	ctx = approvalContext(ctx, approved)
+	ctx, span := observability.Start(ctx, "migration.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
+	defer func() { span.End(retErr) }()
+	if parent.IsValid() && parent.TraceID() != trace.SpanContextFromContext(ctx).TraceID() {
+		span.AddLink(trace.Link{SpanContext: parent})
+	}
+	propagation := observability.Capture(ctx)
+	approved.Traceparent, approved.Tracestate, approved.CorrelationID =
+		propagation.Traceparent, propagation.Tracestate, propagation.CorrelationID
 	job, err := d.store.enqueue(ctx, approved)
 	if err != nil {
 		return Job{}, err
 	}
+	span.SetAttributes(attribute.Int64("job_id", job.ID), attribute.String("execution_id", job.ExecutionID))
+	ctx = observability.WithFields(ctx, attribute.Int64("job_id", job.ID), attribute.String("execution_id", job.ExecutionID))
+	observability.Log(ctx, slog.LevelInfo, "migration.dispatched", "status", job.State)
 	return job, d.source.AcknowledgeDispatch(ctx, approved.RequestID, job.ID)
 }
 
@@ -132,4 +170,8 @@ func (d *Dispatcher) DispatchPending(ctx context.Context) error {
 		dispatchErr = errors.Join(dispatchErr, err)
 	}
 	return dispatchErr
+}
+
+func (d *Dispatcher) SyncMetrics(ctx context.Context) error {
+	return d.store.SyncMetrics(ctx)
 }

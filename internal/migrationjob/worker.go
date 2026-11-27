@@ -14,6 +14,9 @@ import (
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -58,9 +61,10 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) Step(ctx context.Context) (bool, error) {
+func (w *Worker) Step(ctx context.Context) (_ bool, retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, stepTimeout)
 	defer cancel()
+	claimedAt := time.Now()
 	c, err := w.store.claim(ctx, claimLease)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -68,6 +72,14 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	observability.ObserveQueueWait(c.Operation, c.Mode, time.Since(c.CreatedAt))
+	ctx = observability.WithFields(approvalContext(ctx, c.approval),
+		attribute.Int64("job_id", c.ID), attribute.String("execution_id", c.ExecutionID))
+	ctx, span := observability.Start(ctx, "migration.worker", trace.WithSpanKind(trace.SpanKindConsumer), trace.WithTimestamp(claimedAt))
+	defer func() { span.End(retErr) }()
+	claimCtx, claimSpan := observability.Start(ctx, "migration.claim", trace.WithTimestamp(claimedAt))
+	observability.Log(claimCtx, slog.LevelInfo, "migration.claimed", "status", c.State)
+	claimSpan.End(nil)
 	if w.afterClaim != nil {
 		w.afterClaim()
 	}
@@ -76,17 +88,40 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, err
 	}
+	if a.id != "" {
+		ctx = withAttempt(ctx, a.id, c.Attempts)
+	}
 	if a.finishedAt != nil && a.deliveredAt == nil {
 		return true, w.report(ctx, c, a)
 	}
 	return true, w.processTarget(ctx, c, a)
 }
 
-func (w *Worker) report(ctx context.Context, c claim, a attempt) error {
+func withAttempt(ctx context.Context, id string, number int) context.Context {
+	return observability.WithFields(ctx, attribute.String("attempt_id", id), attribute.Int("attempt", number))
+}
+
+func (w *Worker) report(ctx context.Context, c claim, a attempt) (retErr error) {
+	ctx, span := observability.Start(ctx, "migration.history")
+	defer func() { span.End(retErr) }()
+	status := "succeeded"
+	if a.failureCode != "" {
+		status = "failed"
+		observability.Failure(ctx, a.failureCode)
+	}
+	result := "success"
+	if a.failureCode != "" {
+		result = "failure"
+	}
+	observability.ObserveMigration(c.Operation, c.Mode, result, a.finishedAt.Sub(a.startedAt))
+	observability.Log(ctx, slog.LevelInfo, "migration.attempt.result", "status", status, "failure_code", a.failureCode)
 	outcome := Outcome{
 		Approval: c.approval, JobID: c.ID, ExecutionID: c.ExecutionID, AttemptID: a.id,
 		Attempt: c.Attempts, SQL: a.sql, StartedAt: a.startedAt, FinishedAt: *a.finishedAt,
 		FailureCode: a.failureCode, BatchPlan: a.batchPlan,
+	}
+	if a.failureCode == "" {
+		outcome.RollbackOfExecutionID = a.rollbackOf
 	}
 	if err := w.history.Record(ctx, outcome); err != nil {
 		return w.deferStep(ctx, c, Reporting, "history_unavailable")
@@ -120,7 +155,12 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 		_ = tx.Rollback(rbCtx)
 	}()
 
-	locked, err := migration.TryTargetTransactionLock(ctx, tx, c.DatabaseID)
+	lockCtx, lockSpan := observability.Start(ctx, "migration.lock")
+	lockStarted := time.Now()
+	locked, err := migration.TryTargetTransactionLock(lockCtx, tx, c.DatabaseID)
+	observability.ObserveLockWait(c.Operation, c.Mode, time.Since(lockStarted))
+	observability.Log(lockCtx, slog.LevelInfo, "migration.lock.result", "acquired", locked)
+	lockSpan.End(err)
 	if err != nil {
 		return w.deferStep(ctx, c, waitState, "target_unavailable")
 	}
@@ -139,6 +179,9 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 		return w.deferStep(ctx, c, Reconciling, "target_identity_changed")
 	}
 
+	if migration.Operation(c.Operation).IsRecovery() {
+		return w.processRecovery(ctx, tx, c, a, targetID)
+	}
 	if c.Mode == Batch {
 		return w.processBatch(ctx, tx, c, a, targetID)
 	}
@@ -166,29 +209,36 @@ func (w *Worker) processTarget(ctx context.Context, c claim, a attempt) error {
 	if err := w.auth.Recheck(ctx, c.approval); err != nil {
 		return w.dependencyFailure(ctx, c, err)
 	}
-	sql, err := w.plans.ResolveSQL(ctx, c.approval)
+	plan, err := w.plans.ResolvePlan(ctx, c.approval)
 	if err != nil {
 		return w.dependencyFailure(ctx, c, err)
 	}
-	if err := migration.ValidateSQL(sql); err != nil {
+	if err := migration.ValidateSQL(plan.SQL); err != nil {
 		return w.store.reschedule(ctx, c, Failed, "invalid_plan", 0)
 	}
-	planHash := fmt.Sprintf("%x", sha256.Sum256([]byte(sql)))
-	a, err = w.store.startAttempt(ctx, c, targetID, planHash, sql, nil)
+	planHash := fmt.Sprintf("%x", sha256.Sum256([]byte(plan.SQL+"\x00"+plan.TargetExecutionID)))
+	a, err = w.store.startAttempt(ctx, c, targetID, planHash, plan.SQL, nil, plan.RollbackOfExecutionID)
 	if err != nil {
 		return err
 	}
 	c.Attempts++
-	return w.execute(ctx, tx, c, a.id, planHash, sql)
+	return w.execute(ctx, tx, c, a.id, planHash, plan.SQL)
 }
 
-func (w *Worker) execute(ctx context.Context, tx pgx.Tx, c claim, attemptID, planHash, sql string) error {
+func (w *Worker) execute(ctx context.Context, tx pgx.Tx, c claim, attemptID, planHash, sql string) (retErr error) {
+	ctx, span := observability.Start(withAttempt(ctx, attemptID, c.Attempts), "migration.execute")
+	defer func() { span.End(retErr) }()
+	observability.Log(ctx, slog.LevelInfo, "migration.attempt.start", "status", "started")
 	for _, statement := range migration.SplitStatements(sql) {
-		if _, err := tx.Conn().PgConn().ExecParams(ctx, statement, nil, nil, nil, nil).Close(); err != nil {
+		queryCtx, query := observability.StartQuery(ctx, statement, 0)
+		tag, err := tx.Conn().PgConn().ExecParams(queryCtx, statement, nil, nil, nil, nil).Close()
+		query.End(tag.RowsAffected(), err)
+		if err != nil {
 			if rbErr := tx.Rollback(ctx); rbErr != nil {
 				return w.deferStep(ctx, c, Reconciling, "rollback_unverified")
 			}
 			code, retryable := executionFailure(err)
+			observability.Failure(ctx, code)
 			return w.store.finishAttempt(ctx, c, time.Now().UTC(), code, retryable)
 		}
 	}
@@ -220,6 +270,10 @@ func (w *Worker) dependencyFailure(ctx context.Context, c claim, err error) erro
 }
 
 func (w *Worker) deferStep(ctx context.Context, c claim, state State, code string) error {
+	observability.Log(ctx, slog.LevelInfo, "migration.waiting", "status", state, "reason", code)
+	if code != "target_busy" {
+		observability.Failure(ctx, code)
+	}
 	return w.store.reschedule(ctx, c, state, code, retryDelay)
 }
 

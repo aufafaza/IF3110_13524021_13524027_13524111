@@ -1,0 +1,162 @@
+package migrationjob
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/database"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+)
+
+type reviewSource struct {
+	repo *migration.PostgresApprovalRepository
+}
+
+func approvalFromReview(review migration.Review) Approval {
+	return Approval{
+		RequestID: review.RequestID, ActorID: review.RequestedBy, DatabaseID: review.DatabaseID,
+		MigrationID: review.MigrationID, Revision: review.Revision, Operation: review.Operation, Mode: review.Mode,
+		TargetExecutionID: review.TargetExecutionID,
+		Traceparent:       review.Trace.Traceparent, Tracestate: review.Trace.Tracestate, CorrelationID: review.Trace.CorrelationID,
+	}
+}
+
+func (s reviewSource) PendingDispatch(ctx context.Context) ([]Approval, error) {
+	reviews, err := s.repo.PendingApprovedOperations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	approvals := make([]Approval, len(reviews))
+	for i, review := range reviews {
+		approvals[i] = approvalFromReview(review)
+	}
+	return approvals, nil
+}
+
+func (s reviewSource) AcknowledgeDispatch(ctx context.Context, requestID string, jobID int64) error {
+	return s.repo.AcknowledgeDispatch(ctx, requestID, jobID)
+}
+
+type ReviewQueue struct {
+	dispatcher *Dispatcher
+}
+
+func NewReviewQueue(store *Store, reviews *migration.PostgresApprovalRepository) *ReviewQueue {
+	return &ReviewQueue{dispatcher: NewDispatcher(store, reviewSource{repo: reviews})}
+}
+
+func (q *ReviewQueue) DispatchReview(ctx context.Context, review migration.Review) (migration.QueueJob, error) {
+	if review.Status != migration.ReviewApproved {
+		return migration.QueueJob{}, migration.ErrQueueNotApproved
+	}
+	op := migration.Operation(review.Operation)
+	if (!op.IsOrdinary() && !op.IsRecovery()) || (op != migration.OpApply && review.TargetExecutionID == "") {
+		return migration.QueueJob{}, migration.ErrInvalidOperation
+	}
+	job, err := q.dispatcher.Dispatch(ctx, approvalFromReview(review))
+	return migration.QueueJob{
+		ID: job.ID, RequestID: review.RequestID, DatabaseID: job.DatabaseID,
+		Status: string(job.State), Attempts: job.Attempts, CreatedAt: job.CreatedAt,
+	}, err
+}
+
+// Run starts with a discovery pass so an approval committed before a server
+// stop can still reach the worker's queue after restart.
+func (q *ReviewQueue) Run(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		dispatchCtx, cancel := context.WithTimeout(ctx, stepTimeout)
+		if err := q.dispatcher.SyncMetrics(dispatchCtx); err != nil && ctx.Err() == nil {
+			slog.WarnContext(ctx, "migration metrics synchronization failed")
+		}
+		err := q.dispatcher.DispatchPending(dispatchCtx)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			slog.WarnContext(ctx, "approved migration discovery failed")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+type approvedWorkerServices struct {
+	service *migration.Service
+}
+
+func NewApprovedWorker(store *Store, target database.Provider, service *migration.Service) *Worker {
+	deps := approvedWorkerServices{service: service}
+	return NewWorker(store, target, deps, deps, deps)
+}
+
+func (s approvedWorkerServices) Recheck(ctx context.Context, approved Approval) error {
+	level, err := s.service.UserLevel(ctx, approved.ActorID, approved.DatabaseID)
+	if err != nil {
+		return err
+	}
+	if level < access.LevelEdit {
+		return ErrIneligible
+	}
+	return nil
+}
+
+func (s approvedWorkerServices) ResolvePlan(ctx context.Context, approved Approval) (migration.Plan, error) {
+	plan, err := s.service.PlanApproved(ctx, migration.ApprovedOperation{
+		RequestID: approved.RequestID, ActorID: approved.ActorID, DatabaseID: approved.DatabaseID,
+		MigrationID: approved.MigrationID, Revision: approved.Revision, Operation: migration.Operation(approved.Operation),
+		TargetExecutionID: approved.TargetExecutionID,
+	}, true)
+	switch {
+	case errors.Is(err, migration.ErrApprovalRequired), errors.Is(err, migration.ErrRevisionChanged),
+		errors.Is(err, migration.ErrForbidden), errors.Is(err, migration.ErrNotFound),
+		errors.Is(err, migration.ErrAlreadyApplied), errors.Is(err, migration.ErrNotDraft),
+		errors.Is(err, migration.ErrNonTransactionalSQL), errors.Is(err, migration.ErrEmptySQL),
+		errors.Is(err, migration.ErrNotLatestActive), errors.Is(err, migration.ErrNothingToForward),
+		errors.Is(err, migration.ErrIrreversible), errors.Is(err, migration.ErrImmutable),
+		errors.Is(err, migration.ErrOperationTargetChanged), errors.Is(err, migration.ErrRecoveryUnavailable),
+		errors.Is(err, migration.ErrCompensationUnsafe), errors.Is(err, migration.ErrBatchDirection):
+		return migration.Plan{}, errors.Join(ErrIneligible, err)
+	default:
+		if err == nil && approved.Mode != "" && approved.Mode != plan.Mode() {
+			return migration.Plan{}, ErrIneligible
+		}
+		return plan, err
+	}
+}
+
+func (s approvedWorkerServices) ResolveBatch(ctx context.Context, approved Approval) (BatchPlan, error) {
+	plan, err := s.ResolvePlan(ctx, approved)
+	if err != nil {
+		return BatchPlan{}, err
+	}
+	if plan.BatchConfig == nil {
+		return BatchPlan{}, ErrIneligible
+	}
+	return BatchPlan{Size: plan.BatchConfig.Size, ScopeSQL: plan.BatchConfig.ScopeSQL,
+		SQL: plan.SQL, Recovery: plan.BatchConfig.Recovery}, nil
+}
+
+func (s approvedWorkerServices) Record(ctx context.Context, outcome Outcome) error {
+	result := migration.AttemptResult{
+		DatabaseID: outcome.DatabaseID, MigrationID: outcome.MigrationID,
+		ExecutionID: outcome.ExecutionID, AttemptID: outcome.AttemptID,
+		Operation: migration.Operation(outcome.Operation), Status: migration.AttemptSucceeded,
+		ActorID: outcome.ActorID, ExecutedSQL: outcome.SQL, At: outcome.FinishedAt,
+		RollbackOfExecutionID: outcome.RollbackOfExecutionID,
+	}
+	if migration.Operation(outcome.Operation).IsRecovery() {
+		result.RecoveryOfExecutionID = &outcome.TargetExecutionID
+	}
+	if outcome.FailureCode != "" {
+		result.Status = migration.AttemptFailed
+		result.ErrorMessage = &outcome.FailureCode
+	}
+	_, _, err := s.service.RecordAttempt(ctx, result)
+	return err
+}

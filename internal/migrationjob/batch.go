@@ -12,13 +12,14 @@ import (
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/migration"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
-const maxBatchSize = 10_000
-
 type batchProgress struct {
-	scope, batches, rows int64
-	lastKey              *int64
+	scope, batches, rows                int64
+	lastKey                             *int64
+	compensatedBatches, compensatedRows int64
 }
 
 func (w *Worker) processBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt, targetID string) error {
@@ -42,7 +43,7 @@ func (w *Worker) processBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt
 			return err
 		}
 		hash := fmt.Sprintf("%x", sha256.Sum256(snapshot))
-		a, err = w.store.startAttempt(ctx, c, targetID, hash, plan.SQL, snapshot)
+		a, err = w.store.startAttempt(ctx, c, targetID, hash, plan.SQL, snapshot, nil)
 		if err != nil {
 			return err
 		}
@@ -92,11 +93,14 @@ func (w *Worker) processBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt
 	if err := w.auth.Recheck(ctx, c.approval); err != nil {
 		return w.batchAuthorizationFailure(ctx, c, err)
 	}
+	if err := w.recheckBatchPlan(ctx, c, a); err != nil {
+		return w.batchAuthorizationFailure(ctx, c, err)
+	}
 	return w.applyBatchPage(ctx, tx, c, a, p)
 }
 
 func normalizeBatchPlan(plan *BatchPlan) bool {
-	if plan.Size <= 0 || plan.Size > maxBatchSize {
+	if plan.Size <= 0 || plan.Size > migration.MaxBatchSize {
 		return false
 	}
 	for _, sql := range []*string{&plan.ScopeSQL, &plan.SQL} {
@@ -120,7 +124,9 @@ func (w *Worker) batchAuthorizationFailure(ctx context.Context, c claim, err err
 	}
 }
 
-func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a attempt) error {
+func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a attempt) (retErr error) {
+	ctx, span := observability.Start(withAttempt(ctx, a.id, c.Attempts), "migration.batch.scope")
+	defer func() { span.End(retErr) }()
 	if err := w.store.markBatchPending(ctx, c); err != nil {
 		return err
 	}
@@ -137,12 +143,15 @@ func (w *Worker) materializeScope(ctx context.Context, tx pgx.Tx, c claim, a att
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
 	p := batchProgress{scope: tag.RowsAffected()}
-	return w.commitBatch(ctx, tx, c, a, p, false)
+	return w.commitBatch(ctx, tx, c, a, p, false, 0)
 }
 
-func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) error {
+func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress) (retErr error) {
+	ctx, span := observability.Start(observability.WithFields(withAttempt(ctx, a.id, c.Attempts), attribute.Int64("batch_sequence", p.batches+1)), "migration.batch.apply")
+	defer func() { span.End(retErr) }()
 	query := `SELECT key FROM migration_worker.batch_scope WHERE execution_id = $1::uuid ORDER BY key LIMIT $2`
-	args := []any{c.ExecutionID, a.batchPlan.Size}
+	root := c.batchRoot()
+	args := []any{root, a.batchPlan.Size}
 	if p.lastKey != nil {
 		query = `SELECT key FROM migration_worker.batch_scope
 			WHERE execution_id = $1::uuid AND key > $3 ORDER BY key LIMIT $2`
@@ -165,8 +174,21 @@ func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attem
 	if err := w.store.markBatchPending(ctx, c); err != nil {
 		return err
 	}
+	if a.batchPlan.Recovery != nil {
+		if err := verifyBatchUpdateTable(ctx, tx, a.batchPlan.SQL, *a.batchPlan.Recovery, keys); err != nil {
+			return w.rollbackBatch(ctx, tx, c, err)
+		}
+		if err := captureBatchRows(ctx, tx, root, *a.batchPlan.Recovery, keys, true); err != nil {
+			return w.rollbackBatch(ctx, tx, c, err)
+		}
+	}
 	if err := applyBatchUpdate(ctx, tx, a.batchPlan.SQL, keys); err != nil {
 		return w.rollbackBatch(ctx, tx, c, err)
+	}
+	if a.batchPlan.Recovery != nil {
+		if err := captureBatchRows(ctx, tx, root, *a.batchPlan.Recovery, keys, false); err != nil {
+			return w.rollbackBatch(ctx, tx, c, err)
+		}
 	}
 	affected := int64(len(keys))
 	p.batches++
@@ -174,10 +196,10 @@ func (w *Worker) applyBatchPage(ctx context.Context, tx pgx.Tx, c claim, a attem
 	p.lastKey = &keys[len(keys)-1]
 	if _, err := tx.Exec(ctx, `INSERT INTO migration_worker.batch_checkpoints
 		(execution_id, sequence, last_key, affected_rows) VALUES ($1::uuid, $2, $3, $4)`,
-		c.ExecutionID, p.batches, *p.lastKey, affected); err != nil {
+		root, p.batches, *p.lastKey, affected); err != nil {
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
-	return w.commitBatch(ctx, tx, c, a, p, true)
+	return w.commitBatch(ctx, tx, c, a, p, true, affected)
 }
 
 var errBatchKeysMismatch = errors.New("batch UPDATE did not return the expected keys")
@@ -211,14 +233,18 @@ func applyBatchUpdate(ctx context.Context, tx pgx.Tx, sql string, keys []int64) 
 	return nil
 }
 
-func (w *Worker) commitBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, applied bool) error {
+func (w *Worker) commitBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, applied bool, affectedRows int64) error {
 	if _, err := tx.Exec(ctx, `UPDATE migration_worker.batch_runs
 		SET scope_rows = $2, committed_batches = $3, committed_rows = $4, last_key = $5
-		WHERE execution_id = $1::uuid`, c.ExecutionID, p.scope, p.batches, p.rows, p.lastKey); err != nil {
+		WHERE execution_id = $1::uuid`, c.batchRoot(), p.scope, p.batches, p.rows, p.lastKey); err != nil {
 		return w.rollbackBatch(ctx, tx, c, err)
 	}
+	return w.commitBatchStep(ctx, tx, c, a, p, p.rows == p.scope, applied, affectedRows)
+}
+
+func (w *Worker) commitBatchStep(ctx context.Context, tx pgx.Tx, c claim, a attempt, p batchProgress, complete, applied bool, affectedRows int64) error {
 	var completedAt time.Time
-	if p.rows == p.scope {
+	if complete {
 		err := tx.QueryRow(ctx, `INSERT INTO migration_worker.completions (execution_id, attempt_id, plan_hash)
 			VALUES ($1::uuid, $2::uuid, $3) RETURNING completed_at`, c.ExecutionID, a.id, a.planHash).Scan(&completedAt)
 		if err != nil {
@@ -233,6 +259,9 @@ func (w *Worker) commitBatch(ctx context.Context, tx pgx.Tx, c claim, a attempt,
 	}
 	if applied && w.afterCommit != nil {
 		w.afterCommit()
+	}
+	if applied {
+		observability.ObserveBatch(c.Operation, c.Mode, affectedRows)
 	}
 	if !completedAt.IsZero() {
 		if err := w.store.projectBatch(ctx, c, p, false); err != nil {
@@ -261,6 +290,9 @@ func (w *Worker) rollbackBatch(ctx context.Context, tx pgx.Tx, c claim, cause er
 	if err := tx.Rollback(ctx); err != nil {
 		return w.deferStep(ctx, c, Reconciling, "rollback_unverified")
 	}
+	if errors.Is(cause, migration.ErrCompensationUnsafe) {
+		return w.batchFailure(ctx, c, "compensation_unsafe", false)
+	}
 	if errors.Is(cause, errBatchKeysMismatch) {
 		return w.batchFailure(ctx, c, "batch_keys_mismatch", false)
 	}
@@ -269,6 +301,7 @@ func (w *Worker) rollbackBatch(ctx context.Context, tx pgx.Tx, c claim, cause er
 }
 
 func (w *Worker) batchFailure(ctx context.Context, c claim, code string, retryable bool) error {
+	observability.Failure(ctx, code)
 	if retryable && c.batchFailures+1 < c.attemptLimit {
 		return w.store.retryBatch(ctx, c, code)
 	}

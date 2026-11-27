@@ -9,6 +9,7 @@ import (
 
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/access"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/auth"
+	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/observability"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/session"
 	"github.com/aufafaza/IF3110_13524021_13524027_13524111/internal/web/csrf"
 )
@@ -49,7 +50,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		if err != nil {
-			log.Printf("authenticate: validate session: %v", err)
+			log.Printf("authenticate: validate session: %T", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -61,7 +62,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		if err != nil {
-			log.Printf("authenticate: load user: %v", err)
+			log.Printf("authenticate: load user: %T", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -78,7 +79,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			IsPlatformAdmin: stored.IsPlatformAdmin,
 		}
 		ctx = csrf.ContextWithToken(ctx, csrf.TokenFromSecret(validated.Session.CSRFSecret))
-		ctx = access.ContextWithUser(ctx, user)
+		ctx = observability.WithActor(access.ContextWithUser(ctx, user), user.ID)
 		if validated.NewToken != "" {
 			session.SetCookie(w, a.cookie, validated.NewToken, time.Time{})
 		}
@@ -88,7 +89,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 
 func (a *Authenticator) dropSession(ctx context.Context, w http.ResponseWriter, raw string) {
 	if err := a.sessions.Logout(ctx, raw); err != nil {
-		log.Printf("authenticate: revoke session: %v", err)
+		log.Printf("authenticate: revoke session: %T", err)
 	}
 	session.ClearCookie(w, a.cookie)
 }

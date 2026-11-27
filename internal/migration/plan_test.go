@@ -14,7 +14,6 @@ func TestPlanRollbackRules(t *testing.T) {
 		entry(1, "E1", "a1", migration.OpApply, migration.AttemptSucceeded, ""),
 		entry(2, "E2", "a2", migration.OpApply, migration.AttemptSucceeded, ""),
 	}
-	h[0].Revision, h[1].Revision = 1, 1
 	m1 := migration.Migration{ID: 1, Revision: 1, DownSQL: sp("DROP TABLE a;")}
 	m2 := migration.Migration{ID: 2, Revision: 1, DownSQL: sp("DROP TABLE b;")}
 	m2irr := migration.Migration{ID: 2, Revision: 1, IrreversibleReason: sp("data loss")}
@@ -41,15 +40,18 @@ func TestPlanForwardIsSingleLinearStep(t *testing.T) {
 	m1 := migration.Migration{ID: 1, Revision: 1, SQL: "CREATE TABLE a (id int);"}
 	m2 := migration.Migration{ID: 2, Revision: 1, SQL: "CREATE TABLE b (id int);"}
 
-	// Terakhir di-rollback adalah migrasi 1, jadi forward-nya duluan.
 	if _, err := migration.PlanForward(m2, h); !errors.Is(err, migration.ErrNotLatestActive) {
 		t.Fatalf("forward wrong order: %v", err)
 	}
-	if p, err := migration.PlanForward(m1, h); err != nil || p.Operation != migration.OpForward {
+	if p, err := migration.PlanForward(m1, h); err != nil || p.Operation != migration.OpForward || p.TargetExecutionID != "E4" {
 		t.Fatalf("forward m1: %+v %v", p, err)
 	}
 	if _, err := migration.PlanForward(m1, h[:2]); !errors.Is(err, migration.ErrNothingToForward) {
 		t.Fatalf("nothing to forward: %v", err)
+	}
+	m1.Revision++
+	if _, err := migration.PlanForward(m1, h); !errors.Is(err, migration.ErrImmutable) {
+		t.Fatalf("forward of a different revision: %v", err)
 	}
 }
 

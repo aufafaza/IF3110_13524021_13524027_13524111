@@ -39,6 +39,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		access.WriteAPIError(w, "failed to read migration job", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(job)
 }
